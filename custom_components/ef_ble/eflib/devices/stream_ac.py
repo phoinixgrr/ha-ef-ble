@@ -7,6 +7,7 @@ from typing import ClassVar
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from ..connection import ConnectionState
 from ..devicebase import DeviceBase
 from ..entity import controls
 from ..entity.base import dynamic
@@ -157,6 +158,14 @@ class Device(DeviceBase, ProtobufProps):
     feed_grid_pow_limit = pb_field(pb.feed_grid_mode_pow_limit)
     feed_grid_pow_max = pb_field(pb.feed_grid_mode_pow_max)
 
+    # Telemetry additions ported from ecoflow-stream-ble-hack
+    bms_mos_temperature_max = pb_field(pb.bms_max_mos_temp)
+    bms_mos_temperature_min = pb_field(pb.bms_min_mos_temp)
+    feed_grid_safety_power_max = pb_field(pb.feed_grid_safety_pow_max)
+    debug_mode_enabled = pb_field(pb.debug_mode_enable)
+    # Device does not echo inv_target_pwr in telemetry, so we track it locally
+    # via _target_power_value and expose it as a computed field.
+
     energy_strategy = pb_field(
         pb.energy_strategy_operate_mode,
         EnergyStrategy.from_pb,
@@ -179,6 +188,10 @@ class Device(DeviceBase, ProtobufProps):
     ) -> None:
         super().__init__(ble_dev, adv_data, sn)
         self._timer_task_chain: _TimerTaskChain | None = None
+        self._target_power_value: int = 0
+        self._target_power_maintain_task: asyncio.Task | None = None
+        self.on_disconnect(self._cancel_target_power_loop)
+        self.on_connection_state_change(self._on_state_change_restart_loop)
 
     async def packet_parse(self, data: bytes):
         return Packet.from_bytes(data, xor_payload=True)
@@ -198,6 +211,10 @@ class Device(DeviceBase, ProtobufProps):
         self._notify_updated()
 
         return processed
+
+    @computed_field
+    def inverter_target_power(self) -> int:
+        return self._target_power_value
 
     @computed_field
     def load_power_enabled(self) -> bool:
@@ -472,3 +489,83 @@ class Device(DeviceBase, ProtobufProps):
 
         self._timer_task_chain = Device._timer_task_chains[chain_key]
         return self._timer_task_chain
+
+    _TARGET_POWER_REFRESH_SEC = 30
+    _TARGET_POWER_SAFETY_CEILING = 2100
+
+    async def _write_inverter_target_power(self, power: int):
+        # Per ecoflow-stream-ble-hack: inv_target_pwr is clamped by
+        # feed_grid_safety_pow_max. Raise safety cap first, then target.
+        if power > 0:
+            safety = min(power, self._TARGET_POWER_SAFETY_CEILING)
+            await self._send_config_packet(
+                bk_series_pb2.ConfigWrite(cfg_feed_grid_safety_pow_max=safety)
+            )
+            await asyncio.sleep(0.5)
+        await self._send_config_packet(
+            bk_series_pb2.ConfigWrite(cfg_inv_target_pwr=float(power))
+        )
+
+    async def _target_power_loop(self):
+        try:
+            while (
+                self._target_power_value is not None
+                and self._target_power_value > 0
+                and self.is_connected
+            ):
+                try:
+                    await self._write_inverter_target_power(self._target_power_value)
+                    self._logger.info(
+                        "Target power refresh: %sW", self._target_power_value
+                    )
+                except Exception as exc:
+                    self._logger.warning("Target power refresh failed: %s", exc)
+                await asyncio.sleep(self._TARGET_POWER_REFRESH_SEC)
+        except asyncio.CancelledError:
+            pass
+
+    def _cancel_target_power_loop(self, *_args, **_kwargs):
+        if self._target_power_maintain_task is not None:
+            self._target_power_maintain_task.cancel()
+            self._target_power_maintain_task = None
+
+    def _on_state_change_restart_loop(self, state: ConnectionState):
+        if (
+            state == ConnectionState.AUTHENTICATED
+            and self._target_power_value
+            and self._target_power_value > 0
+            and (
+                self._target_power_maintain_task is None
+                or self._target_power_maintain_task.done()
+            )
+        ):
+            self._target_power_maintain_task = asyncio.create_task(
+                self._target_power_loop()
+            )
+
+    @controls.power(inverter_target_power, min=0, max=2100)
+    async def set_inverter_target_power(self, power: float):
+        value = int(power)
+        self._logger.info("set_inverter_target_power called with %sW", value)
+        if value < 0:
+            return False
+        self.reset_updated()
+        self._target_power_value = value
+        self._notify_updated()
+        try:
+            await self._write_inverter_target_power(value)
+            self._logger.info("Wrote cfg_inv_target_pwr=%sW", value)
+        except Exception as exc:
+            self._logger.warning("Failed initial target power write: %s", exc)
+            return False
+        if value > 0:
+            if (
+                self._target_power_maintain_task is None
+                or self._target_power_maintain_task.done()
+            ):
+                self._target_power_maintain_task = asyncio.create_task(
+                    self._target_power_loop()
+                )
+        else:
+            self._cancel_target_power_loop()
+        return True

@@ -369,6 +369,9 @@
       },
       "lv_solar_low_voltage": {
         "name": "LV Solar Voltage Low"
+      },
+      "debug_mode_enabled": {
+        "name": "Debug Mode"
       }
     },
     "sensor": {
@@ -911,6 +914,18 @@
       },
       "ac_c20_in_type": {
         "name": "AC C20 In Type"
+      },
+      "bms_mos_temperature_max": {
+        "name": "BMS MOSFET Temperature (Max)"
+      },
+      "bms_mos_temperature_min": {
+        "name": "BMS MOSFET Temperature (Min)"
+      },
+      "feed_grid_safety_power_max": {
+        "name": "Feed-in Safety Max"
+      },
+      "inverter_target_power": {
+        "name": "Inverter Target Power"
       }
     },
     "select": {
@@ -997,7 +1012,7 @@
         "name": "AC C20 Charging Power"
       },
       "feed_grid_pow_limit": {
-        "name": "Feed Grid Power Limit"
+        "name": "Feed-in Power Limit"
       },
       "base_load_power": {
         "name": "Base Load Power"
@@ -1028,6 +1043,9 @@
       },
       "dc_charging_max_amps_2": {
         "name": "DC (2) Charging Max Amps"
+      },
+      "inverter_target_power": {
+        "name": "Inverter Target Power"
       }
     },
     "climate": {
@@ -1099,7 +1117,7 @@
         "name": "AC (2)"
       },
       "feed_grid": {
-        "name": "Feed Grid"
+        "name": "Feed-in Control"
       },
       "charging_task_enabled": {
         "name": "Charging Task"

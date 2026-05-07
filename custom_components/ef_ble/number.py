@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from homeassistant.components.number import (
     NumberDeviceClass,
-    NumberEntity,
     NumberEntityDescription,
+    RestoreNumber,
 )
 from homeassistant.const import (
     PERCENTAGE,
@@ -179,7 +179,7 @@ async def async_setup_entry(
         async_add_entities(entities)
 
 
-class EcoflowNumber(EcoflowEntity, NumberEntity):
+class EcoflowNumber(EcoflowEntity, RestoreNumber):
     def __init__(
         self,
         device: DeviceBase,
@@ -246,3 +246,19 @@ class EcoflowNumber(EcoflowEntity, NumberEntity):
             return
 
         await super().async_set_native_value(value)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Restore last value for entities whose device doesn't echo state back.
+        # The device's reconciliation loop will push it on next AUTHENTICATED.
+        if self._prop_name != "inverter_target_power":
+            return
+        last = await self.async_get_last_number_data()
+        if last is None or last.native_value is None:
+            return
+        value = int(last.native_value)
+        if value <= 0:
+            return
+        self._device._target_power_value = value
+        self._attr_native_value = value
+        self.async_write_ha_state()

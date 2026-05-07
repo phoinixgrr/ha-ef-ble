@@ -759,6 +759,22 @@ _SENSORS: Final[dict[str, SensorEntityDescription]] = {
     "load_from_battery": power(),
     "load_from_grid": power(),
     "load_from_pv": power(),
+    "bms_mos_temperature_max": temperature(translation_key="bms_mos_temperature_max"),
+    "bms_mos_temperature_min": temperature(
+        enabled=False,
+        translation_key="bms_mos_temperature_min",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    "feed_grid_safety_power_max": power(
+        enabled=False,
+        translation_key="feed_grid_safety_power_max",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    "inverter_target_power": power(
+        enabled=False,
+        translation_key="inverter_target_power",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
     "ac_power_{n}": port_power("AC ({n})", indexed_range=range(3)),
     "ac_power_1_1": port_power("AC (1-1)"),
     "ac_power_1_2": port_power("AC (1-2)"),

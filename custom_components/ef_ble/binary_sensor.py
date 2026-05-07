@@ -176,6 +176,11 @@ _BINARY_SENSORS: Final[dict[str, BinarySensorEntityDescription]] = {
     "lv_solar_low_voltage": problem(
         enabled=False, entity_category=EntityCategory.DIAGNOSTIC
     ),
+    "debug_mode_enabled": _make_desc(
+        BinarySensorDeviceClass.RUNNING,
+        enabled=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 }
 
 BINARY_SENSOR_TYPES: Final[dict[str, BinarySensorEntityDescription]] = (
