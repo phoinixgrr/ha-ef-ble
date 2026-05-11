@@ -26,7 +26,7 @@ class FrameAssembler(ABC):
 
     @abstractmethod
     async def reassemble(self, data: bytes) -> list[bytes]:
-        """Decode wire bytes into decrypted payloads ready for Packet.fromBytes()"""
+        """Decode wire bytes into decrypted payloads ready for Packet.from_bytes()"""
 
 
 class EncPacketAssembler(FrameAssembler):
@@ -40,12 +40,12 @@ class EncPacketAssembler(FrameAssembler):
         return EncPacket(
             EncPacket.FRAME_TYPE_PROTOCOL,
             EncPacket.PAYLOAD_TYPE_VX_PROTOCOL,
-            packet.toBytes(),
+            packet.to_bytes(),
             0,
             0,
             self._encryption.session_key,
             self._encryption.iv,
-        ).toBytes()
+        ).to_bytes()
 
     async def reassemble(self, data: bytes) -> list[bytes]:
         if self._buffer:
@@ -109,7 +109,7 @@ class RawHeaderAssembler(FrameAssembler):
         return False
 
     async def encode(self, packet: Packet) -> bytes:
-        raw = packet.toBytes()
+        raw = packet.to_bytes()
         header = raw[:5]
         inner = raw[5:]
         encrypted = await self._encryption.encrypt(inner)
@@ -140,7 +140,17 @@ class RawHeaderAssembler(FrameAssembler):
             payload_length = struct.unpack("<H", data[2:4])[0]
             version = data[1]
 
-            inner_overhead = 15 if version >= 3 else 13
+            # Bytes after the 5-byte unencrypted header that are NOT payload_length:
+            #   V4  (0x04): outer[5..7] (3 B) + CRC16 (2 B) = 5   (payload_length includes 8-B inner cmd)
+            #   V3  (0x03): product+seq+zeros+addr+cmd (13 B) + CRC16 (2 B) = 15
+            #   V19 (0x13): same 13-B cmd section; no CRC16; \xbb\xbb is inside payload_length = 13
+            #   V2  (0x02): product+seq+zeros+addr+cmd (11 B) + CRC16 (2 B) = 13
+            if version == 4:
+                inner_overhead = 5
+            elif version >= 3:
+                inner_overhead = 15
+            else:
+                inner_overhead = 13
             inner_len = inner_overhead + payload_length
             encrypted_len = (inner_len + 15) // 16 * 16
             frame_len = 5 + encrypted_len
@@ -172,7 +182,7 @@ class SimplePacketAssembler:
             EncPacket.FRAME_TYPE_COMMAND,
             EncPacket.PAYLOAD_TYPE_VX_PROTOCOL,
             payload,
-        ).toBytes()
+        ).to_bytes()
 
     def parse(self, data: bytes) -> bytes | None:
         """
