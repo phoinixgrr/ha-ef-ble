@@ -12,15 +12,20 @@ from homeassistant.components.bluetooth import (
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
 )
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler
 from homeassistant.const import CONF_ADDRESS, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+import voluptuous as vol
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.exceptions import (
+    ConfigEntryNotReady as _BaseConfigEntryNotReady,
+)
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_call_later
 
 from . import eflib
 from .config_flow import CONF_COLLECT_PACKETS, ConfLogOptions, LogOptions, PacketVersion
@@ -65,9 +70,53 @@ ConfigEntryNotReady = partial(ConfigEntryNotReady, translation_domain=DOMAIN)
 ConfigEntryError = partial(ConfigEntryError, translation_domain=DOMAIN)
 
 _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
+SOLAR_ONLY_RETRY_DELAY = 600
+
+SET_ENTRY_DISABLED_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): str,
+        vol.Required("disabled"): bool,
+    }
+)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    async def _set_entry_disabled(call: ServiceCall) -> None:
+        entry_id = call.data["entry_id"]
+        disabled = call.data["disabled"]
+        await hass.config_entries.async_set_disabled_by(
+            entry_id,
+            ConfigEntryDisabler.USER if disabled else None,
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        "set_entry_disabled",
+        _set_entry_disabled,
+        schema=SET_ENTRY_DISABLED_SCHEMA,
+    )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> bool:
+    """Setup wrapper: long backoff for solar-only devices to avoid BLE proxy churn while panels asleep."""
+    try:
+        return await _async_setup_entry_inner(hass, entry)
+    except _BaseConfigEntryNotReady:
+        device = getattr(entry, "runtime_data", None)
+        if device is not None and eflib.is_solar_only(device):
+            async def _delayed_reload(_now):
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+            async_call_later(hass, SOLAR_ONLY_RETRY_DELAY, _delayed_reload)
+            _LOGGER.info(
+                "Solar-only device %s setup failed; rescheduling reload in %ds",
+                entry.title, SOLAR_ONLY_RETRY_DELAY,
+            )
+            return False
+        raise
+
+
+async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry) -> bool:
     """Set up EF BLE device from a config entry."""
     _LOGGER.debug("Init EcoFlow BLE Integration")
 
