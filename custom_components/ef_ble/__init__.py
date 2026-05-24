@@ -1,6 +1,7 @@
 """The unofficial EcoFlow BLE devices integration"""
 
 import logging
+import time
 from collections.abc import Callable
 from functools import partial
 
@@ -70,6 +71,9 @@ ConfigEntryNotReady = partial(ConfigEntryNotReady, translation_domain=DOMAIN)
 ConfigEntryError = partial(ConfigEntryError, translation_domain=DOMAIN)
 
 _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
+_CHURN_STATE_KEY = f"{DOMAIN}_churn_state"
+_CHURN_FAST_THRESHOLD = 30.0  # seconds: post-auth uptime under this = churn
+_CHURN_RESET_THRESHOLD = 120.0  # seconds: uptime over this clears churn
 SOLAR_ONLY_RETRY_DELAY = 600
 
 SET_ENTRY_DISABLED_SCHEMA = vol.Schema(
@@ -228,11 +232,46 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
     _LOGGER.debug("Setup done")
     entry.async_on_unload(entry.add_update_listener(_update_listener))
 
-    def _on_disconnect(exc: Exception | type[Exception] | None):
-        async def _disconnect_and_reload():
-            hass.config_entries.async_schedule_reload(entry.entry_id)
+    # Track per-entry churn state across reloads. _on_disconnect destroys the
+    # Connection object via reload, so any churn counter living on the device
+    # gets wiped each cycle. Persist it here in hass.data so we can apply real
+    # backoff when the peripheral keeps kicking us shortly after auth.
+    churn_state: dict[str, dict] = hass.data.setdefault(_CHURN_STATE_KEY, {})
+    state = churn_state.setdefault(
+        entry.entry_id, {"streak": 0, "last_auth": 0.0}
+    )
+    state["last_auth"] = time.monotonic()
 
-        hass.async_create_task(_disconnect_and_reload())
+    def _on_disconnect(exc: Exception | type[Exception] | None):
+        now = time.monotonic()
+        last_auth = state.get("last_auth", 0.0)
+        uptime = now - last_auth if last_auth > 0 else 999.0
+
+        if uptime < _CHURN_FAST_THRESHOLD:
+            state["streak"] = state.get("streak", 0) + 1
+        elif uptime > _CHURN_RESET_THRESHOLD:
+            state["streak"] = 0
+
+        streak = state["streak"]
+        if streak <= 1:
+            delay = 0
+        else:
+            # 15s, 30s, 60s, 120s, 240s, capped at 300s
+            delay = min(15 * (2 ** (streak - 2)), 300)
+
+        _LOGGER.info(
+            "Disconnect for %s after %.1fs uptime (streak=%d, reload in %ds)",
+            entry.title, uptime, streak, delay,
+        )
+
+        if delay <= 0:
+            async def _disconnect_and_reload():
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+            hass.async_create_task(_disconnect_and_reload())
+        else:
+            async def _delayed(_now):
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+            async_call_later(hass, delay, _delayed)
 
     entry.async_on_unload(device.on_disconnect(_on_disconnect))
 
@@ -251,6 +290,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> b
 async def async_remove_entry(hass: HomeAssistant, entry: DeviceConfigEntry):
     _cancel_reappear_callback(hass, entry)
     ConnectionLog.clean_cache_for(entry.data[CONF_ADDRESS])
+    churn_state: dict = hass.data.get(_CHURN_STATE_KEY, {})
+    churn_state.pop(entry.entry_id, None)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
