@@ -254,6 +254,12 @@ class Connection:
         self._reconnect_attempt: int = 0
         self._reconnect = True
 
+        # Track post-auth lifetime for churn detection. If auth completes
+        # but the peripheral kicks us within a few seconds, treat the next
+        # reconnect as a continuation of the failure and back off.
+        self._last_auth_time: float = 0.0
+        self._post_auth_churn_count: int = 0
+
         self._connection_state: ConnectionState = None  # pyright: ignore[reportAttributeAccessIssue]
         self._set_state(ConnectionState.CREATED)
 
@@ -406,6 +412,34 @@ class Connection:
         self._logger.warning("Disconnected from device")
         self._client = None
 
+        # Reset frame-level state that's tied to the just-killed BLE link.
+        # Without this, the next connection inherits the stale partial-frame
+        # buffer (SimplePacketAssembler._buffer) and any cached encryption
+        # strategy. The new session uses fresh keys, but old buffered bytes
+        # get prepended to the first incoming notifications -> CRC fails ->
+        # handshake fails -> infinite churn.
+        self._simple_assembler = SimplePacketAssembler()
+        self._encryption = None
+
+        # Detect post-auth churn: peripheral accepted us but kicked within
+        # a few seconds. This happens when the device firmware is in a
+        # confused state (e.g. after the proxy was reset). Hammering retries
+        # makes it worse. Track consecutive premature kicks and apply real
+        # exponential backoff instead of resetting to the 10s default.
+        if self._last_auth_time > 0:
+            uptime = time.monotonic() - self._last_auth_time
+            self._last_auth_time = 0.0
+            if uptime < 30.0:
+                self._post_auth_churn_count += 1
+                self._logger.warning(
+                    "Post-auth disconnect after %.1fs (churn streak: %d)",
+                    uptime,
+                    self._post_auth_churn_count,
+                )
+            else:
+                # Healthy session, clear churn tracking
+                self._post_auth_churn_count = 0
+
         # NOTE(gnox): don't trigger disconnect/reconnect logic while
         # establish_connection is still retrying internally (bleak_retry_connector
         # manages its own retries and will raise on final failure)
@@ -441,6 +475,21 @@ class Connection:
         # Wait before reconnect
         if self._reconnect_attempt == 0:
             self._retry_on_disconnect_delay = 10
+
+        # If the previous session ended via post-auth churn (peripheral kicked
+        # us shortly after auth), don't hammer. Apply exponential backoff
+        # capped at 5 minutes to give the peripheral time to clear its
+        # internal stale-bond state instead of fighting it on every cycle.
+        if self._post_auth_churn_count > 1:
+            churn_delay = min(15 * (2 ** (self._post_auth_churn_count - 2)), 300)
+            self._retry_on_disconnect_delay = max(
+                self._retry_on_disconnect_delay, churn_delay
+            )
+            self._logger.warning(
+                "Post-auth churn detected (%d streak), backing off %ds",
+                self._post_auth_churn_count,
+                self._retry_on_disconnect_delay,
+            )
 
         self._reconnect_attempt += 1
         if self._reconnect_attempt > MAX_RECONNECT_ATTEMPTS:
@@ -1063,6 +1112,10 @@ class Connection:
                 await self._check_auth(packet)
                 self._connection_attempt = 0
                 self._reconnect_attempt = 0
+                # Record auth time so the disconnect handler can detect
+                # post-auth churn (auth ok but device drops within seconds)
+                # and back off properly instead of hammering retries.
+                self._last_auth_time = time.monotonic()
                 processed = True
                 self._logger.info("Auth completed, everything is fine")
                 self._set_state(ConnectionState.AUTHENTICATED)

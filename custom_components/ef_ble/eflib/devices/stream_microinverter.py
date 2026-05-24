@@ -131,7 +131,7 @@ class Device(DeviceBase, ProtobufProps):
                 self._target_power_loop()
             )
 
-    @controls.power(inverter_target_power, min=0, max=2100)
+    @controls.power(inverter_target_power, min=0, max=2300)
     async def set_inverter_target_power(self, power: float):
         value = int(power)
         if value < 0:

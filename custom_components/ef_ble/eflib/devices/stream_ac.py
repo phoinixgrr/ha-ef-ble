@@ -7,6 +7,7 @@ from typing import ClassVar
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from ..commands import TimeCommands
 from ..connection import ConnectionState
 from ..devicebase import DeviceBase
 from ..entity import controls
@@ -190,6 +191,7 @@ class Device(DeviceBase, ProtobufProps):
         self._timer_task_chain: _TimerTaskChain | None = None
         self._target_power_value: int = 0
         self._target_power_maintain_task: asyncio.Task | None = None
+        self._time_commands = TimeCommands(self)
         self.on_disconnect(self._cancel_target_power_loop)
         self.on_connection_state_change(self._on_state_change_restart_loop)
 
@@ -206,6 +208,18 @@ class Device(DeviceBase, ProtobufProps):
 
         if packet.src == 0x02 and packet.cmd_set == 0xFE and packet.cmd_id == 0x15:
             self.update_from_bytes(bk_series_pb2.DisplayPropertyUpload, packet.payload)
+            processed = True
+
+        elif (
+            packet.src == 0x35
+            and packet.cmd_set == 0x01
+            and packet.cmd_id == Packet.NET_BLE_COMMAND_CMD_SET_RET_TIME
+        ):
+            # Device asks for current time/timezone. AC Pro disconnects after
+            # ~5s if we don't respond; Ultra is more lenient but still expects
+            # this. Same handler as shp2/delta3/etc.
+            if len(packet.payload) == 0:
+                self._time_commands.async_send_all()
             processed = True
 
         self._notify_updated()
@@ -491,7 +505,7 @@ class Device(DeviceBase, ProtobufProps):
         return self._timer_task_chain
 
     _TARGET_POWER_REFRESH_SEC = 30
-    _TARGET_POWER_SAFETY_CEILING = 2100
+    _TARGET_POWER_SAFETY_CEILING = 2300
 
     async def _write_inverter_target_power(self, power: int):
         # Per ecoflow-stream-ble-hack: inv_target_pwr is clamped by
@@ -543,7 +557,7 @@ class Device(DeviceBase, ProtobufProps):
                 self._target_power_loop()
             )
 
-    @controls.power(inverter_target_power, min=0, max=2100)
+    @controls.power(inverter_target_power, min=0, max=2300)
     async def set_inverter_target_power(self, power: float):
         value = int(power)
         self._logger.info("set_inverter_target_power called with %sW", value)

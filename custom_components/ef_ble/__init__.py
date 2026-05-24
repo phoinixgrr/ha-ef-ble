@@ -144,7 +144,12 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
     if device is None:
         device = eflib.NewDevice(discovery_info.device, discovery_info.advertisement)
         if device is None:
-            raise ConfigEntryNotReady(translation_key="unable_to_create_device")
+            # Advertisement lacks the EcoFlow manufacturer payload (peripheral
+            # is in transient bare-address state). Wait for a proper advert via
+            # the reappear callback instead of escalating into HA's exponential
+            # backoff via unable_to_create_device.
+            _register_reappear_callback(hass, entry, address)
+            raise ConfigEntryNotReady(translation_key="device_not_present")
 
         entry.runtime_data = device
     elif discovery_info is not None:
@@ -302,6 +307,15 @@ def _register_reappear_callback(
         service_info: BluetoothServiceInfoBleak,
         change: BluetoothChange,
     ) -> None:
+        # Ignore bare-address advertisements (manufacturer_data missing or empty).
+        # EcoFlow peripherals briefly emit address-only adverts during reconnect
+        # cycles; reloading on those just triggers exponential backoff in
+        # NewDevice() since sn_from_advertisement returns None.
+        man_data = service_info.advertisement.manufacturer_data.get(
+            eflib.DeviceBase.MANUFACTURER_KEY
+        )
+        if not man_data:
+            return
         _LOGGER.info(
             "Device %s reappeared via BLE advertisement, scheduling reload",
             address,
