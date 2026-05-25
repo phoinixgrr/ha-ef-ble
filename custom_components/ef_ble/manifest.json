@@ -203,5 +203,5 @@
         "protobuf~=6.30"
     ],
 
-    "version": "0.9.6-phoinix"
+    "version": "0.9.7-phoinix"
 }

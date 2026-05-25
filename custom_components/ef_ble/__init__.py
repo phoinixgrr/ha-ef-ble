@@ -73,7 +73,8 @@ ConfigEntryError = partial(ConfigEntryError, translation_domain=DOMAIN)
 _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
 _CHURN_STATE_KEY = f"{DOMAIN}_churn_state"
 _CHURN_FAST_THRESHOLD = 30.0  # seconds: post-auth uptime under this = churn
-_CHURN_RESET_THRESHOLD = 120.0  # seconds: uptime over this clears churn
+_CHURN_RESET_THRESHOLD = 60.0  # seconds: uptime over this clears churn
+_CHURN_DEDUP_WINDOW = 2.0  # seconds: dedup rapid-fire disconnect callbacks
 SOLAR_ONLY_RETRY_DELAY = 600
 
 SET_ENTRY_DISABLED_SCHEMA = vol.Schema(
@@ -238,12 +239,20 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
     # backoff when the peripheral keeps kicking us shortly after auth.
     churn_state: dict[str, dict] = hass.data.setdefault(_CHURN_STATE_KEY, {})
     state = churn_state.setdefault(
-        entry.entry_id, {"streak": 0, "last_auth": 0.0}
+        entry.entry_id, {"streak": 0, "last_auth": 0.0, "last_disconnect": 0.0}
     )
     state["last_auth"] = time.monotonic()
 
     def _on_disconnect(exc: Exception | type[Exception] | None):
         now = time.monotonic()
+        # Dedup rapid-fire disconnect callbacks. bleak fires the disconnect
+        # callback multiple times in quick succession (we observed two
+        # callbacks at the same millisecond) which would otherwise
+        # double-increment the streak and trigger duplicate reloads.
+        if now - state.get("last_disconnect", 0.0) < _CHURN_DEDUP_WINDOW:
+            return
+        state["last_disconnect"] = now
+
         last_auth = state.get("last_auth", 0.0)
         uptime = now - last_auth if last_auth > 0 else 999.0
 
