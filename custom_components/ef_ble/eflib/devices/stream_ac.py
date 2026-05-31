@@ -210,18 +210,6 @@ class Device(DeviceBase, ProtobufProps):
             self.update_from_bytes(bk_series_pb2.DisplayPropertyUpload, packet.payload)
             processed = True
 
-        elif (
-            packet.src == 0x35
-            and packet.cmd_set == 0x01
-            and packet.cmd_id == Packet.NET_BLE_COMMAND_CMD_SET_RET_TIME
-        ):
-            # Device asks for current time/timezone. AC Pro disconnects after
-            # ~5s if we don't respond; Ultra is more lenient but still expects
-            # this. Same handler as shp2/delta3/etc.
-            if len(packet.payload) == 0:
-                self._time_commands.async_send_all()
-            processed = True
-
         self._notify_updated()
 
         return processed
