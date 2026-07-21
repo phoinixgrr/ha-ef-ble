@@ -2,3 +2,4 @@
 custom_components/ef_ble/eflib/pb/*.pyi
 ha_ef_ble.egg-info/
 uv.lock
+AGENTS.md
