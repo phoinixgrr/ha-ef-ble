@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from homeassistant.components.number import (
     NumberDeviceClass,
-    NumberEntity,
     NumberEntityDescription,
+    RestoreNumber,
 )
 from homeassistant.const import (
     PERCENTAGE,
@@ -19,7 +19,6 @@ from .deprecated.numbers import NUMBER_TYPES
 from .description_builder import EntityDescriptionBuilder, unit_to_hassunit
 from .eflib import DeviceBase, controls, get_controls
 from .eflib.devices import smart_generator
-from .eflib.entity import DynamicValue
 from .eflib.props import Field
 from .entity import EcoflowEntity
 
@@ -53,11 +52,7 @@ class NumberSensorBuilder(EntityDescriptionBuilder):
         self._device_class = device_class
         return self
 
-    def native_unit_of_measurement(self, unit):
-        if isinstance(unit, DynamicValue):
-            return self.native_unit_of_measurement_field(
-                lambda dev: unit_to_hassunit(unit.resolve(dev)) or ""
-            )
+    def native_unit_of_measurement(self, unit: str):
         self._native_unit_of_measurement = unit_to_hassunit(unit)
         return self
 
@@ -184,7 +179,7 @@ async def async_setup_entry(
         async_add_entities(entities)
 
 
-class EcoflowNumber(EcoflowEntity, NumberEntity):
+class EcoflowNumber(EcoflowEntity, RestoreNumber):
     def __init__(
         self,
         device: DeviceBase,
@@ -251,3 +246,19 @@ class EcoflowNumber(EcoflowEntity, NumberEntity):
             return
 
         await super().async_set_native_value(value)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Restore last value for entities whose device doesn't echo state back.
+        # The device's reconciliation loop will push it on next AUTHENTICATED.
+        if self._prop_name != "inverter_target_power":
+            return
+        last = await self.async_get_last_number_data()
+        if last is None or last.native_value is None:
+            return
+        value = int(last.native_value)
+        if value <= 0:
+            return
+        self._device._target_power_value = value
+        self._attr_native_value = value
+        self.async_write_ha_state()

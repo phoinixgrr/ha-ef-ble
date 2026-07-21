@@ -116,8 +116,6 @@ class Delta2Base(DeviceBase, RawDataProps):
                 model = "3 1500"
             case "R351" | "R354":
                 model = "2 Max"
-            case "R701":
-                model = "2 Black"
 
         return f"Delta {model}"
 

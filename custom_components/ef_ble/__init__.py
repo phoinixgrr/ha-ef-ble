@@ -13,9 +13,10 @@ from homeassistant.components.bluetooth import (
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
 )
-from homeassistant.config_entries import ConfigEntry
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler
 from homeassistant.const import CONF_ADDRESS, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -68,6 +69,31 @@ ConfigEntryError = partial(ConfigEntryError, translation_domain=DOMAIN)
 
 _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
 
+SET_ENTRY_DISABLED_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): str,
+        vol.Required("disabled"): bool,
+    }
+)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    async def _set_entry_disabled(call: ServiceCall) -> None:
+        entry_id = call.data["entry_id"]
+        disabled = call.data["disabled"]
+        await hass.config_entries.async_set_disabled_by(
+            entry_id,
+            ConfigEntryDisabler.USER if disabled else None,
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        "set_entry_disabled",
+        _set_entry_disabled,
+        schema=SET_ENTRY_DISABLED_SCHEMA,
+    )
+    return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> bool:
     """Set up EF BLE device from a config entry."""
@@ -82,14 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> bo
     )
 
     if address is None or user_id is None:
-        # Returning False here would fail setup without any log or UI message
-        # (issue #403) - raise instead so the user sees what is wrong
-        raise ConfigEntryError(
-            translation_key="missing_address_or_user_id",
-            translation_placeholders={
-                "missing": "address" if address is None else "user ID"
-            },
-        )
+        return False
 
     if not bluetooth.async_address_present(hass, address):
         _register_reappear_callback(hass, entry, address)

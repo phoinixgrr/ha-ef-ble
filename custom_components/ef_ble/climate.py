@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import DeviceConfigEntry
-from .description_builder import EntityDescriptionBuilder, unit_to_hassunit
+from .description_builder import EntityDescriptionBuilder
 from .eflib import DeviceBase, controls, get_controls
 from .entity import EcoflowEntity
 
@@ -41,8 +41,6 @@ class EcoflowClimateEntityDescription(ClimateEntityDescription):
 
     min_temp: float | None = None
     max_temp: float | None = None
-    min_temp_prop: str | None = None
-    max_temp_prop: str | None = None
     target_temperature_step: float = 1.0
     min_range_temp: float | None = None
     max_range_temp: float | None = None
@@ -50,7 +48,6 @@ class EcoflowClimateEntityDescription(ClimateEntityDescription):
     min_humidity: int | None = None
     max_humidity: int | None = None
     temperature_unit: str = UnitOfTemperature.CELSIUS
-    temperature_unit_prop: str | None = None
 
     set_power_func: Any = None
     set_operating_mode_func: Any = None
@@ -77,8 +74,6 @@ class ClimateBuilder(EntityDescriptionBuilder):
     _fan_speed_hvac_modes: frozenset[HVACMode] | None = None
     _min_temp: float | None = None
     _max_temp: float | None = None
-    _min_temp_prop: str | None = None
-    _max_temp_prop: str | None = None
     _target_temperature_step: float = 1.0
     _min_range_temp: float | None = None
     _max_range_temp: float | None = None
@@ -86,7 +81,6 @@ class ClimateBuilder(EntityDescriptionBuilder):
     _min_humidity: int | None = None
     _max_humidity: int | None = None
     _temperature_unit: str = UnitOfTemperature.CELSIUS
-    _temperature_unit_prop: str | None = None
     _set_power_func: Any = None
     _set_operating_mode_func: Any = None
     _set_target_temp_func: Any = None
@@ -175,18 +169,12 @@ class ClimateBuilder(EntityDescriptionBuilder):
             self._fan_speed_prop = prop
         return self
 
-    def min_temp(self, value):
-        if field := self._get_field(value):
-            self._min_temp_prop = field.public_name
-        else:
-            self._min_temp = value
+    def min_temp(self, value: float | None):
+        self._min_temp = value
         return self
 
-    def max_temp(self, value):
-        if field := self._get_field(value):
-            self._max_temp_prop = field.public_name
-        else:
-            self._max_temp = value
+    def max_temp(self, value: float | None):
+        self._max_temp = value
         return self
 
     def min_range_temp(self, value: float | None):
@@ -205,11 +193,8 @@ class ClimateBuilder(EntityDescriptionBuilder):
         self._target_temperature_range_step = value
         return self
 
-    def temperature_unit(self, value):
-        if field := self._get_field(value):
-            self._temperature_unit_prop = field.public_name
-        else:
-            self._temperature_unit = value
+    def temperature_unit(self, value: str):
+        self._temperature_unit = value
         return self
 
     def set_power_func(self, func: Any):
@@ -258,8 +243,6 @@ class ClimateBuilder(EntityDescriptionBuilder):
             fan_speed_hvac_modes=self._fan_speed_hvac_modes,
             min_temp=self._min_temp,
             max_temp=self._max_temp,
-            min_temp_prop=self._min_temp_prop,
-            max_temp_prop=self._max_temp_prop,
             target_temperature_step=self._target_temperature_step,
             min_range_temp=self._min_range_temp,
             max_range_temp=self._max_range_temp,
@@ -267,7 +250,6 @@ class ClimateBuilder(EntityDescriptionBuilder):
             min_humidity=self._min_humidity,
             max_humidity=self._max_humidity,
             temperature_unit=self._temperature_unit,
-            temperature_unit_prop=self._temperature_unit_prop,
             set_power_func=self._set_power_func,
             set_operating_mode_func=self._set_operating_mode_func,
             set_target_temp_func=self._set_target_temp_func,
@@ -454,23 +436,6 @@ class EcoflowClimateEntity(EcoflowEntity, ClimateEntity):
             "_attr_fan_mode",
             description.fan_speed_prop,
             get_state=self._speed_to_fan.get,
-        )
-        self._register_update_callback(
-            "_attr_min_temp",
-            description.min_temp_prop,
-            get_state=lambda state: state if state is not None else self.SkipWrite,
-        )
-        self._register_update_callback(
-            "_attr_max_temp",
-            description.max_temp_prop,
-            get_state=lambda state: state if state is not None else self.SkipWrite,
-        )
-        self._register_update_callback(
-            "_attr_temperature_unit",
-            description.temperature_unit_prop,
-            get_state=lambda state: (
-                unit_to_hassunit(state) if state is not None else self.SkipWrite
-            ),
         )
 
         self._update_supported_features()
