@@ -193,14 +193,15 @@
           "extra_battery": "已启用的额外电池"
         }
       },
-      "connecting": {
+      "connect": {
         "title": "正在连接设备"
       }
     },
     "progress": {
-      "connecting": "正在连接设备...",
-      "authenticating": "连接成功，正在运行认证程序...",
-      "disconnecting": "成功！正在断开设备连接..."
+      "connecting": "正在与 {name} 建立蓝牙连接...",
+      "exchanging_keys": "已连接到 {name}，正在交换加密密钥...",
+      "authenticating": "正在与 {name} 进行身份验证...",
+      "finalizing": "正在完成连接检查..."
     }
   },
   "options": {
@@ -285,6 +286,9 @@
     },
     "failed_after_successful_connection": {
       "message": "设备已连接但未进入认证程序，上一个状态: {last_state}"
+    },
+    "missing_address_or_user_id": {
+      "message": "存储的配置缺少设备数据（{missing}）。请删除该设备并重新添加以修复配置条目。"
     }
   },
   "issues": {
@@ -342,6 +346,9 @@
       "grid_status": {
         "name": "电网状态"
       },
+      "grid_is_energized": {
+        "name": "电网带电"
+      },
       "bms_run_state": {
         "name": "BMS 运行状态"
       },
@@ -350,6 +357,9 @@
       },
       "backup_force_charge": {
         "name": "通道 {channel} 强制充电"
+      },
+      "backup_channel_signal_line": {
+        "name": "通道 {channel} 信号线"
       },
       "is_charging": {
         "name": "正在充电"
@@ -379,6 +389,12 @@
       },
       "battery_level": {
         "name": "电池电量"
+      },
+      "lcd_battery_level": {
+        "name": "LCD 电池电量"
+      },
+      "bms_battery_level": {
+        "name": "BMS 电池电量"
       },
       "battery_time_remaining": {
         "name": "电池剩余时间"
@@ -471,6 +487,9 @@
       },
       "circuit_current": {
         "name": "电路电流 {index}"
+      },
+      "circuit_voltage": {
+        "name": "电路电压 {index}"
       },
       "channel_power": {
         "name": "通道功率 {index}"
@@ -576,6 +595,12 @@
       },
       "cell_temperature": {
         "name": "电芯温度"
+      },
+      "max_cell_voltage": {
+        "name": "最高电芯电压"
+      },
+      "min_cell_voltage": {
+        "name": "最低电芯电压"
       },
       "dc_port_input_power": {
         "name": "直流端口输入功率"
@@ -913,6 +938,29 @@
       },
       "ac_c20_in_type": {
         "name": "AC C20 输入类型"
+      },
+      "circuit_status": {
+        "name": "电路 {index} 状态",
+        "state": {
+          "unknown": "未知",
+          "off": "关闭",
+          "on_grid": "开启（电网）",
+          "on_back": "开启（备用）",
+          "em_stop": "紧急停止"
+        }
+      },
+      "circuit_name": {
+        "name": "电路 {index} 名称"
+      },
+      "backup_channel_type": {
+        "name": "通道 {channel} 类型",
+        "state": {
+          "unknown": "未知",
+          "none": "无",
+          "battery": "电池",
+          "oil": "智能发电机",
+          "station_charger": "充电桩"
+        }
       }
     },
     "select": {
@@ -961,6 +1009,14 @@
           "self_powered": "自给自足",
           "scheduled": "定时任务",
           "intelligent": "智能调度"
+        }
+      },
+      "dc_mode": {
+        "name": "DC 模式",
+        "state": {
+          "auto": "自动",
+          "solar": "太阳能",
+          "car": "车充"
         }
       },
       "energy_strategy": {
@@ -1052,6 +1108,9 @@
       },
       "channel_is_enabled": {
         "name": "通道 {channel}"
+      },
+      "storm_guard": {
+        "name": "风暴防护"
       },
       "ch_force_charge": {
         "name": "通道 {channel} 强制充电"
