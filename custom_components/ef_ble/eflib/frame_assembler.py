@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from .crc import crc8, crc16
 from .encpacket import EncPacket
 from .encryption import EncryptionStrategy
-from .exceptions import PacketParseError
 from .packet import Packet
 
 
@@ -101,6 +100,62 @@ class EncPacketAssembler(FrameAssembler):
         return payloads
 
 
+class PassthroughAssembler(FrameAssembler):
+    """Frame assembler for encrypt_type 0: plain V3 packets, no outer encryption"""
+
+    def __init__(self, encryption: EncryptionStrategy | None = None) -> None:
+        super().__init__(encryption)  # type: ignore[arg-type]
+
+    @property
+    def write_with_response(self) -> bool:
+        return False
+
+    async def encode(self, packet: Packet) -> bytes:
+        return packet.to_bytes()
+
+    async def reassemble(self, data: bytes) -> list[bytes]:
+        if self._buffer:
+            data = self._buffer + data
+            self._buffer = b""
+
+        payloads: list[bytes] = []
+        while data:
+            start = data.find(Packet.PREFIX)
+            if start < 0:
+                data = b""
+                break
+            if start > 0:
+                data = data[start:]
+
+            if len(data) < 5:
+                break
+
+            if crc8(data[:4]) != data[4]:
+                # not a valid header here - skip this byte and keep scanning
+                data = data[1:]
+                continue
+
+            payload_length = struct.unpack("<H", data[2:4])[0]
+            version_byte = data[1]
+
+            if version_byte == 4:
+                # V4: 8-byte outer header + payload + 2-byte CRC16
+                frame_len = 8 + payload_length + 2
+            else:
+                # V2/V3: 5-byte header + inner-cmd block + payload + 2-byte CRC16
+                inner_overhead = 15 if (version_byte & 0x0F) >= 3 else 13
+                frame_len = 5 + inner_overhead + payload_length
+
+            if len(data) < frame_len:
+                break
+
+            payloads.append(data[:frame_len])
+            data = data[frame_len:]
+
+        self._buffer = data
+        return payloads
+
+
 class RawHeaderAssembler(FrameAssembler):
     """Frame codec for encrypt_type 1: 5-byte plaintext header (0xAA) + AES body"""
 
@@ -188,10 +243,12 @@ class SimplePacketAssembler:
         """
         Extract the payload from one EncPacket frame, scanning for the prefix
 
-        Returns the payload when a complete valid frame is found, or None if the data is
-        incomplete and another BLE notification is expected to arrive. Raises
-        PacketParseError only when the data is clearly unrecoverable (no prefix found,
-        or only CRC-invalid candidates with nothing left to scan).
+        Returns the payload when a complete valid frame is found, or None when no frame
+        is available yet and another BLE notification is expected to arrive: incomplete
+        data, stale/foreign notification bytes with no frame prefix, or only CRC-invalid
+        candidates. This assembler runs only during the auth handshake, where the right
+        response to unparseable data is to wait for the next notification (and let the
+        connection timeout bound a truly stuck device) rather than abort the handshake.
         """
         if self._buffer:
             data = self._buffer + data
@@ -200,9 +257,7 @@ class SimplePacketAssembler:
         while data:
             start = data.find(EncPacket.PREFIX)
             if start < 0:
-                raise PacketParseError(
-                    f"SimplePacketAssembler: no prefix found in: {data.hex()}"
-                )
+                return None
             if start > 0:
                 data = data[start:]
 
@@ -231,6 +286,6 @@ class SimplePacketAssembler:
 
             return payload_data
 
-        raise PacketParseError(
-            f"SimplePacketAssembler: no valid frame found in: {data.hex()}"
-        )
+        # Loop only exits here when the data was fully consumed without yielding a frame
+        # (all candidates were false prefixes / CRC failures). Wait for more data.
+        return None

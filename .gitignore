@@ -1,1 +1,6 @@
+.venv-merge/
 custom_components/ef_ble/eflib/pb/*.pyi
+ha_ef_ble.egg-info/
+tests/__pycache__/
+tests/eflib/__pycache__/
+uv.lock

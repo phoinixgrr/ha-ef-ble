@@ -1,5 +1,6 @@
 """The unofficial EcoFlow BLE devices integration"""
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -35,6 +36,7 @@ from .const import (
     CONF_BLUEZ_START_NOTIFY,
     CONF_COLLECT_PACKETS_AMOUNT,
     CONF_CONNECTION_TIMEOUT,
+    CONF_DIAGNOSTICS_ON_EXCEPTION,
     CONF_DIAGNOSTICS_OPTIONS,
     CONF_EXTRA_BATTERY,
     CONF_PACKET_VERSION,
@@ -134,7 +136,14 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
     )
 
     if address is None or user_id is None:
-        return False
+        # Returning False here would fail setup without any log or UI message
+        # (issue #403) - raise instead so the user sees what is wrong
+        raise ConfigEntryError(
+            translation_key="missing_address_or_user_id",
+            translation_placeholders={
+                "missing": "address" if address is None else "user ID"
+            },
+        )
 
     if not bluetooth.async_address_present(hass, address):
         _register_reappear_callback(hass, entry, address)
@@ -164,6 +173,7 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
     packet_collection_enabled = diag_options.get(
         CONF_COLLECT_PACKETS, eflib.is_unsupported(device)
     )
+    diagnostics_on_exception = diag_options.get(CONF_DIAGNOSTICS_ON_EXCEPTION, False)
 
     advanced = merged_options.get(CONF_ADVANCED_CONNECTION_OPTIONS, {})
     timeout = advanced.get(CONF_CONNECTION_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT)
@@ -180,14 +190,17 @@ async def _async_setup_entry_inner(hass: HomeAssistant, entry: DeviceConfigEntry
             .with_disabled_reconnect()
             .with_packet_version(packet_version.to_num())
             .with_enabled_packet_diagnostics(packet_collection_enabled)
+            .with_diagnostics_on_exception(diagnostics_on_exception)
             .with_connection_options(options)
             .connect(
                 user_id=user_id,
                 max_attempts=0 if eflib.is_solar_only(device) else None,
             )
         )
-        state = await device.wait_until_authenticated_or_error(raise_on_error=True)
+        async with asyncio.timeout(timeout):
+            state = await device.wait_until_authenticated_or_error(raise_on_error=True)
     except (ConnectionTimeout, BleakError, TimeoutError) as e:
+        await device.disconnect()
         raise ConfigEntryNotReady(
             translation_key="could_not_connect",
             translation_placeholders={"time": str(timeout), "error_msg": str(e)},
@@ -291,7 +304,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> b
     """Unload a config entry."""
     _cancel_reappear_callback(hass, entry)
     device = entry.runtime_data
-    await device.disconnect()
+    try:
+        await device.disconnect()
+    except Exception:
+        _LOGGER.exception("Error disconnecting device during unload, continuing")
     device.with_logging_options(LogOptions.no_options())
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
@@ -398,6 +414,7 @@ async def _update_listener(hass: HomeAssistant, entry: DeviceConfigEntry):
         CONF_COLLECT_PACKETS, eflib.is_unsupported(device)
     )
     diagnostics_buffer_size = diag_options.get(CONF_COLLECT_PACKETS_AMOUNT, 100)
+    diagnostics_on_exception = diag_options.get(CONF_DIAGNOSTICS_ON_EXCEPTION, False)
     advanced = merged_options.get(CONF_ADVANCED_CONNECTION_OPTIONS, {})
     options = Connection.Options(
         timeout=advanced.get(CONF_CONNECTION_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT),
@@ -411,5 +428,6 @@ async def _update_listener(hass: HomeAssistant, entry: DeviceConfigEntry):
             enabled=packet_collection,
             buffer_size=diagnostics_buffer_size,
         )
+        .with_diagnostics_on_exception(diagnostics_on_exception)
         .with_connection_options(options)
     )

@@ -73,6 +73,37 @@ Click on any device below to see available sensors, switches, and controls:
 
 </details>
 <details>
+<summary><b>Smart Home Panel 3</b></summary>
+
+<br>
+
+| *Sensors*                          | *Switches*                          | *Sliders*            | *Selects*      |
+|------------------------------------|-------------------------------------|----------------------|----------------|
+| Battery Level                      | Circuit On/Off (Each Circuit)       | Charge Limit         | Operating Mode |
+| Battery Power                      | Channel On/Off (Each Channel)       | Discharge Limit      |                |
+| System Load                        | Storm Guard                         | Backup Reserve Level |                |
+| Load From Grid                     | EPS Mode                            | AC Charging Speed    |                |
+| PV Power Total                     | Channel Force Charge (Each Channel) |                      |                |
+| Grid Connection Status             |                                     |                      |                |
+| Grid Energized                     |                                     |                      |                |
+| Charge Time Remaining              |                                     |                      |                |
+| Discharge Time Remaining           |                                     |                      |                |
+| L1 / L2 / L3 Power                 |                                     |                      |                |
+| L1 / L2 / L3 Voltage               |                                     |                      |                |
+| L1 / L2 / L3 Current               |                                     |                      |                |
+| Circuit Power (Each Circuit)       |                                     |                      |                |
+| Circuit Current (Each Circuit)     |                                     |                      |                |
+| Circuit Voltage (Each Circuit)     |                                     |                      |                |
+| Circuit Status (Each Circuit)      |                                     |                      |                |
+| Channel Type (Each Channel)        |                                     |                      |                |
+| Channel Signal Line (Each Channel) |                                     |                      |                |
+
+> **📝 Note:** Using an ESPHome bluetooth proxy connection with a Smart Home Panel 3 can
+> result in slow performance and dropped packets at this time. Please see the
+> [Issue #221](https://github.com/rabits/ha-ef-ble/issues/221) for tracking.
+
+</details>
+<details>
 <summary><b>Delta Pro Ultra</b></summary>
 
 <br>
@@ -169,6 +200,41 @@ Click on any device below to see available sensors, switches, and controls:
 > **📝 Note:** Extra batteries are detected when the integration is set up. If you
 > connect or disconnect a battery, you can reconfigure the integration to update
 > the registered devices.
+
+</details>
+<details>
+<summary><b>Delta Pro Ultra X</b></summary>
+
+<br>
+
+| *Sensors*                           |
+|-------------------------------------|
+| Battery Level                       |
+| Input Power Total                   |
+| Output Power Total                  |
+| AC Input Power                      |
+| AC Input Voltage                    |
+| AC Input Current                    |
+| Solar Input Power                   |
+| Solar Input Power 2                 |
+| PV Voltage 1                        |
+| PV Voltage 2                        |
+| PV Current 1                        |
+| PV Current 2                        |
+| AC Plugged In                       |
+| Storm Mode                          |
+| Cell Temperature (disabled)         |
+| Charge Time Remaining (disabled)    |
+| Discharge Time Remaining (disabled) |
+| Error Occurred (disabled) ¹         |
+| Sleep State (disabled)              |
+| WiFi RSSI (disabled)                |
+
+<sup>¹ Includes error code as an extra attribute</sup>
+
+> **📝 Note:** Delta Pro Ultra X does not expose energy sensors. To use with the energy
+> dashboard, you must create them yourself. See the [Home Assistant FAQ](https://www.home-assistant.io/docs/energy/faq/#creating-an-energy-sensor-out-of-a-power-sensor)
+> for instructions.
 
 </details>
 <details>
@@ -533,7 +599,7 @@ Click on any device below to see available sensors, switches, and controls:
 </details>
 
 <details>
-<summary><b>Delta 2</b> <i>(Max, Delta 3 1500)</i></summary>
+<summary><b>Delta 2</b> <i>(Max, Black (E980), Delta 3 1500)</i></summary>
 
 <br>
 

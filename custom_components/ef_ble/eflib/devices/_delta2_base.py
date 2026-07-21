@@ -38,22 +38,36 @@ pb_inv = dataclass_attr_mapper(DirectInvDeltaHeartbeatPack)
 
 
 class Delta2Base(DeviceBase, RawDataProps):
-    ac_output_power = raw_field(pb_inv.output_watts)
-    ac_input_voltage = raw_field(pb_inv.ac_in_vol, pdiv(1000, 2))
-    ac_input_current = raw_field(pb_inv.ac_in_amp, pdiv(1000, 2))
-    ac_output_voltage = raw_field(pb_inv.inv_out_vol, pdiv(1000, 2))
-    ac_output_current = raw_field(pb_inv.inv_out_amp, pdiv(1000, 2))
+    ac_output_power = raw_field(pb_inv.output_watts).default_when_missing(0)
+    ac_input_voltage = raw_field(pb_inv.ac_in_vol, pdiv(1000, 2)).default_when_missing(
+        0
+    )
+    ac_input_current = raw_field(pb_inv.ac_in_amp, pdiv(1000, 2)).default_when_missing(
+        0,
+    )
+    ac_output_voltage = raw_field(
+        pb_inv.inv_out_vol, pdiv(1000, 2)
+    ).default_when_missing(0)
+    ac_output_current = raw_field(
+        pb_inv.inv_out_amp, pdiv(1000, 2)
+    ).default_when_missing(0)
 
     battery_level_main = raw_field(pb_bms.f32_show_soc, pround(2))
 
     battery_1_enabled = Field[bool]()
     battery_1_battery_level = Field[float]()
     battery_1_cell_temperature = raw_field(pb_bms_1.max_cell_temp)
+    battery_1_voltage = raw_field(pb_bms_1.vol, pdiv(1000, 2))
+    battery_1_max_cell_voltage = raw_field(pb_bms_1.max_cell_vol, pdiv(1000, 3))
+    battery_1_min_cell_voltage = raw_field(pb_bms_1.min_cell_vol, pdiv(1000, 3))
     battery_1_sn = Field[str]()
 
     battery_2_enabled = Field[bool]()
     battery_2_battery_level = Field[float]()
     battery_2_cell_temperature = raw_field(pb_bms_2.max_cell_temp)
+    battery_2_voltage = raw_field(pb_bms_2.vol, pdiv(1000, 2))
+    battery_2_max_cell_voltage = raw_field(pb_bms_2.max_cell_vol, pdiv(1000, 3))
+    battery_2_min_cell_voltage = raw_field(pb_bms_2.min_cell_vol, pdiv(1000, 3))
     battery_2_sn = Field[str]()
 
     battery_level = raw_field(pb_ems.f32_lcd_show_soc, pround(2))
@@ -68,7 +82,9 @@ class Delta2Base(DeviceBase, RawDataProps):
     qc_usb1_output_power = raw_field(pb_pd.qc_usb1_watt)
     qc_usb2_output_power = raw_field(pb_pd.qc_usb2_watt)
 
-    ac_ports = raw_field(pb_inv.cfg_ac_enabled, lambda x: x == 1)
+    ac_ports = raw_field(pb_inv.cfg_ac_enabled, lambda x: x == 1).default_when_missing(
+        False
+    )
     usb_ports = raw_field(pb_pd.dc_out_state, lambda x: x == 1)
 
     battery_charge_limit_min = raw_field(pb_ems.min_dsg_soc)
@@ -78,6 +94,9 @@ class Delta2Base(DeviceBase, RawDataProps):
     remaining_time_discharging = raw_field(pb_ems.dsg_remain_time)
 
     cell_temperature = raw_field(pb_bms.max_cell_temp)
+    battery_voltage = raw_field(pb_bms.vol, pdiv(1000, 2))
+    max_cell_voltage = raw_field(pb_bms.max_cell_vol, pdiv(1000, 3))
+    min_cell_voltage = raw_field(pb_bms.min_cell_vol, pdiv(1000, 3))
 
     dc_input_voltage = raw_field(pb_mppt.in_vol, pdiv(1000, 2))
     dc_input_current = raw_field(pb_mppt.in_amp, pdiv(1000, 2))
@@ -106,6 +125,8 @@ class Delta2Base(DeviceBase, RawDataProps):
                 model = "3 1500"
             case "R351" | "R354":
                 model = "2 Max"
+            case "R701":
+                model = "2 Black"
 
         return f"Delta {model}"
 

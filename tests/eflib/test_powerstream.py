@@ -164,6 +164,8 @@ async def test_powerstream_exact_values_from_known_packets(device, packet_sequen
 
     expected = {
         Device.battery_level: 46.15,
+        Device.lcd_battery_level: 31.02,
+        Device.bms_battery_level: 31,
         Device.battery_power: 0.0,
         Device.battery_temperature: 21.0,
         Device.pv_power_1: 6.0,

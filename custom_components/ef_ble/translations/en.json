@@ -43,12 +43,12 @@
             "name": "EcoFlow Login (skip if you already have your user ID)",
             "description": "After you click Submit with your login information filled in, your EcoFlow User ID will be automatically populated and this form will clear itself. Only your user ID is required so you will not be able to proceed to the next page unless this section is empty.",
             "data": {
-              "email": "Email",
+              "email": "Email / Phone",
               "password": "Password",
               "region": "Region"
             },
             "data_description": {
-              "region": "If you receive an \"Account does not exist\" message after logging in, or if the connection fails with \"User ID may be incorrect\", try selecting a different region."
+              "region": "Pick the EcoFlow API host matching your account. Auto uses api.ecoflow.com for email and api-cn for phone numbers. Your account may live on a different host than your actual geographic region, so if you receive an \"Account does not exist\" message, try selecting the host explicitly."
             }
           },
           "log_options": {
@@ -100,12 +100,12 @@
             "name": "EcoFlow Login (skip if you already have your user ID)",
             "description": "After you click Submit with your login information filled in, your EcoFlow User ID will be automatically populated and this form will clear itself. Only your user ID is required so you will not be able to proceed to the next page unless this section is empty.",
             "data": {
-              "email": "Email",
+              "email": "Email / Phone",
               "password": "Password",
               "region": "Region"
             },
             "data_description": {
-              "region": "If you receive an \"Account does not exist\" message after logging in, or if the connection fails with \"User ID may be incorrect\", try selecting a different region."
+              "region": "Pick the EcoFlow API host matching your account. Auto uses api.ecoflow.com for email and api-cn for phone numbers. Your account may live on a different host than your actual geographic region, so if you receive an \"Account does not exist\" message, try selecting the host explicitly."
             }
           },
           "log_options": {
@@ -152,12 +152,12 @@
             "name": "EcoFlow Login (skip if you already have your user ID)",
             "description": "After you click Submit with your login information filled in, your EcoFlow User ID will be automatically populated and this form will clear itself. Only your user ID is required so you will not be able to proceed to the next page unless this section is empty.",
             "data": {
-              "email": "Email",
+              "email": "Email / Phone",
               "password": "Password",
               "region": "Region"
             },
             "data_description": {
-              "region": "If you receive an \"Account does not exist\" message after logging in, or if the connection fails with \"User ID may be incorrect\", try selecting a different region."
+              "region": "Pick the EcoFlow API host matching your account. Auto uses api.ecoflow.com for email and api-cn for phone numbers. Your account may live on a different host than your actual geographic region, so if you receive an \"Account does not exist\" message, try selecting the host explicitly."
             }
           },
           "log_options": {
@@ -193,14 +193,15 @@
           "extra_battery": "Enabled Extra Batteries"
         }
       },
-      "connecting": {
+      "connect": {
         "title": "Connecting to device"
       }
     },
     "progress": {
-      "connecting": "Connecting to device...",
-      "authenticating": "Connection successful, running authentication procedure...",
-      "disconnecting": "Sucess! Disconnecting from device..."
+      "connecting": "Establishing Bluetooth connection to {name}...",
+      "exchanging_keys": "Connected to {name}, exchanging encryption keys...",
+      "authenticating": "Authenticating with {name}...",
+      "finalizing": "Finishing the connection check..."
     }
   },
   "options": {
@@ -218,11 +219,13 @@
             "name": "Diagnostics",
             "description": "Configure diagnostics data collection and encryption.",
             "data": {
+              "diagnostics_on_exception": "Save diagnostics on exception",
               "collect_packets": "Enable packet collection",
               "collect_packets_amount": "Number of packets to store",
               "diagnostics_encrypt": "Encrypt diagnostics data"
             },
             "data_description": {
+              "diagnostics_on_exception": "When enabled, packets are collected from the start of each connection attempt. If a connection error occurs, collected data is automatically saved to disk for debugging.",
               "collect_packets": "Enabling this option will start storing packets for diagnostics info - wait a minute after you enable this option before downloading diagnostics info and don't forget to turn it off.\nSome devices may contain identifying information in their messages such as your exact location, make sure encryption is enabled before sharing.",
               "diagnostics_encrypt": "When enabled, sensitive diagnostics data (packets, session keys, manufacturer data) is encrypted before being included in the diagnostics download. Disable only if you need raw data for local debugging."
             }
@@ -283,6 +286,9 @@
     },
     "failed_after_successful_connection": {
       "message": "Device connected but did not get to auth procedure, last state: {last_state}"
+    },
+    "missing_address_or_user_id": {
+      "message": "Stored configuration is missing the device {missing}. Remove the device and add it again to repair the configuration entry."
     }
   },
   "issues": {
@@ -293,6 +299,9 @@
   },
   "entity": {
     "button": {
+      "power_off": {
+        "name": "Power Off"
+      },
       "unpause_solar": {
         "name": "Unpause Solar"
       }
@@ -337,6 +346,12 @@
       "storm_mode": {
         "name": "Storm Mode"
       },
+      "grid_is_energized": {
+        "name": "Grid Energized"
+      },
+      "backup_channel_signal_line": {
+        "name": "Channel {channel} Signal Line"
+      },
       "grid_status": {
         "name": "Grid Status"
       },
@@ -380,6 +395,12 @@
       },
       "battery_level": {
         "name": "Battery Level"
+      },
+      "lcd_battery_level": {
+        "name": "LCD Battery Level"
+      },
+      "bms_battery_level": {
+        "name": "BMS Battery Level"
       },
       "battery_time_remaining": {
         "name": "Battery Time Remaining"
@@ -472,6 +493,32 @@
       },
       "circuit_current": {
         "name": "Circuit Current {index}"
+      },
+      "circuit_voltage": {
+        "name": "Circuit Voltage {index}"
+      },
+      "circuit_status": {
+        "name": "Circuit {index} Status",
+        "state": {
+          "unknown": "Unknown",
+          "off": "Off",
+          "on_grid": "On (Grid)",
+          "on_back": "On (Backup)",
+          "em_stop": "Emergency Stop"
+        }
+      },
+      "backup_channel_type": {
+        "name": "Channel {channel} Type",
+        "state": {
+          "unknown": "Unknown",
+          "none": "None",
+          "battery": "Battery",
+          "oil": "Smart Generator",
+          "station_charger": "Station Charger"
+        }
+      },
+      "circuit_name": {
+        "name": "Circuit {index} Name"
       },
       "channel_power": {
         "name": "Channel Power {index}"
@@ -577,6 +624,12 @@
       },
       "cell_temperature": {
         "name": "Cell Temperature"
+      },
+      "max_cell_voltage": {
+        "name": "Max Cell Voltage"
+      },
+      "min_cell_voltage": {
+        "name": "Min Cell Voltage"
       },
       "dc_port_input_power": {
         "name": "DC Port Input Power"
@@ -935,6 +988,14 @@
       "dc_charging_type": {
         "name": "DC Charging Type"
       },
+      "dc_mode": {
+        "name": "DC Mode",
+        "state": {
+          "auto": "Auto",
+          "solar": "Solar",
+          "car": "Car"
+        }
+      },
       "performance_mode": {
         "name": "Performance Mode"
       },
@@ -972,7 +1033,8 @@
           "none": "None",
           "time_of_use": "TOU",
           "self_powered": "Self Powered",
-          "scheduled": "Scheduled Tasks"
+          "scheduled": "Scheduled Tasks",
+          "intelligent": "Intelligent Schedule"
         }
       },
       "energy_strategy": {
@@ -1074,6 +1136,9 @@
       "eps_mode": {
         "name": "EPS Mode"
       },
+      "storm_guard": {
+        "name": "Storm Guard"
+      },
       "dc_ports": {
         "name": "DC Ports"
       },
@@ -1124,6 +1189,19 @@
       },
       "discharging_task_enabled": {
         "name": "Discharging Task"
+      }
+    }
+  },
+  "selector": {
+    "ecoflow_region": {
+      "options": {
+        "auto": "Auto (api.ecoflow.com for email, api-cn for phone)",
+        "api": "api.ecoflow.com (Global / US)",
+        "api-e": "api-e.ecoflow.com (Europe)",
+        "api-a": "api-a.ecoflow.com (Asia / MEA)",
+        "api-j": "api-j.ecoflow.com (Japan)",
+        "api-r": "api-r.ecoflow.com (Russia)",
+        "api-cn": "api-cn.ecoflow.com (China - phone number only)"
       }
     }
   }

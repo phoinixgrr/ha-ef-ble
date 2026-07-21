@@ -26,10 +26,16 @@ from .logging_util import (
     DeviceDiagnosticsCollector,
     DeviceLogger,
     LogOptions,
+    caller_chain,
 )
 from .packet import Packet
 from .props.raw_data_props import Literal
-from .props.updatable_props import Field
+from .props.updatable_props import Field, UpdatableProps
+
+# Seconds to wait after authentication before falling back to a field's
+# `default_when_missing` value (covers devices that withhold a whole message while the
+# related hardware is off, e.g. the inverter heartbeat while AC output is off).
+MISSING_DEFAULT_GRACE = 10
 
 
 class _Listeners(ListenerRegistry):
@@ -94,6 +100,9 @@ class DeviceBase(abc.ABC):
 
         self._manufacturer_data = adv_data.manufacturer_data[self.MANUFACTURER_KEY]
 
+        if UpdatableProps.is_props(self) and self.fields_with_missing_default():
+            self.on_connection_state_change(self._schedule_missing_field_defaults)
+
     @property
     def device(self):
         return self.__doc__ or ""
@@ -139,6 +148,15 @@ class DeviceBase(abc.ABC):
     def connection_state(self):
         return None if self._conn is None else self._conn._connection_state
 
+    def set_connection_state(
+        self,
+        state: ConnectionState,
+        exc: Exception | type[Exception] | None = None,
+    ) -> None:
+        if self._conn is None:
+            return
+        self._conn.set_state(state, exc)
+
     @property
     def diagnostics(self):
         return self._diagnostics
@@ -154,7 +172,7 @@ class DeviceBase(abc.ABC):
         event_loop: asyncio.AbstractEventLoop | None = None,
     ):
         def _register_timer_task(state: ConnectionState):
-            if state == ConnectionState.AUTHENTICATED:
+            if state.authenticated:
                 self._conn.add_timer_task(coro, interval, event_loop)
 
         self.on_connection_state_change(_register_timer_task)
@@ -220,6 +238,11 @@ class DeviceBase(abc.ABC):
         self._diagnostics.with_buffer_size(buffer_size)
         return self
 
+    def with_diagnostics_on_exception(self, enabled: bool = True):
+        """Enable automatic diagnostics save to disk on connection errors"""
+        self._diagnostics.with_save_on_exception(enabled)
+        return self
+
     def with_name(self, name: str):
         self._name = name
         return self
@@ -269,7 +292,7 @@ class DeviceBase(abc.ABC):
             self._conn.on_packet_data_received(self._listeners.on_packet_received)
             self._conn.on_packet_parsed(self._listeners.on_packet_parsed)
             self._conn.on_state_change(self._listeners.on_connection_state_change)
-            self._conn.on_state_change(self.connection_log.append)
+            self._conn.on_state_change(self._append_state_to_log)
             self._conn.on_data_received(self._listeners.on_data_received)
             self._conn.on_data_send(self._listeners.on_data_send)
 
@@ -278,12 +301,16 @@ class DeviceBase(abc.ABC):
 
         await self._conn.connect(max_attempts=max_attempts)
 
+    def _append_state_to_log(self, state: ConnectionState) -> None:
+        reason = self._conn.state_reason if self._conn is not None else None
+        self.connection_log.append(state, reason)
+
     async def disconnect(self):
         if self._conn is None:
             self._logger.error("Device has no connection")
             return
 
-        await self._conn.disconnect()
+        await self._conn.disconnect(reason=caller_chain())
         self._connection_event.clear()
         self._conn = None
 
@@ -446,6 +473,26 @@ class DeviceBase(abc.ABC):
 
         self.update_callback(name)
         self.update_state(name, value)
+
+    def _schedule_missing_field_defaults(self, state: ConnectionState) -> None:
+        if not state.authenticated:
+            return
+
+        self.call_later(
+            MISSING_DEFAULT_GRACE,
+            self._apply_missing_field_defaults,
+            key="missing_field_defaults",
+        )
+
+    def _apply_missing_field_defaults(self) -> None:
+        # a field declared with `default_when_missing` whose message never arrived is
+        # still `None` here - fall back to its declared off value so it isn't left
+        # unavailable; a real value afterwards still overrides it
+        if not UpdatableProps.is_props(self):
+            return
+        for prop_field in self.fields_with_missing_default():
+            if self.get_value(prop_field) is None:
+                self.notify_field(prop_field, prop_field.missing_default)
 
 
 @dataclass

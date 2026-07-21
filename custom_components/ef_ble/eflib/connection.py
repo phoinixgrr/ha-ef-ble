@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Collection, Coroutine, MutableS
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from functools import cached_property
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 import ecdsa
 from bleak import BleakClient
@@ -21,6 +21,7 @@ from bleak.exc import BleakError
 from bleak_retry_connector import (
     MAX_CONNECT_ATTEMPTS,
     BleakNotFoundError,
+    close_stale_connections_by_address,
     establish_connection,
 )
 
@@ -38,16 +39,23 @@ from .exceptions import (
 )
 from .frame_assembler import (
     EncPacketAssembler,
+    PassthroughAssembler,
     RawHeaderAssembler,
     SimplePacketAssembler,
 )
 from .listeners import ListenerGroup, ListenerRegistry
-from .logging_util import ConnectionLogger, LogOptions
+from .logging_util import ConnectionLogger, LogOptions, caller_chain
 from .packet import Packet
 from .props.utils import classproperty
 
 MAX_RECONNECT_ATTEMPTS = 2
 MAX_CONNECTION_ATTEMPTS = 10
+
+# `BleakClient.disconnect()` can block until the connect timeout (default 20s) when a
+# write-with-response is still pending on the transport after a mid-auth BLE drop
+# (notably through an ESPHome proxy). Left unbounded it stalls `async_unload_entry`
+# long enough for HA to mark the entry `FAILED_UNLOAD`, so cap every disconnect.
+DISCONNECT_TIMEOUT = 5.0
 
 
 _BT_PROTOCOL_UUIDS = {
@@ -229,11 +237,13 @@ class Connection:
         self._packet_version = packet_version
         self._encrypt_type = encrypt_type
         self._encryption: EncryptionStrategy | None = None
+        self._initial_session_key: bytes = b""
         self._simple_assembler = SimplePacketAssembler()
         self._options = Connection.Options()
 
         self._errors = 0
         self._last_errors = deque(maxlen=10)
+        self._disconnect_log: deque[dict[str, Any]] = deque(maxlen=10)
         self._client = None
         self._connected = asyncio.Event()
         self._disconnected = asyncio.Event()
@@ -261,6 +271,7 @@ class Connection:
         self._post_auth_churn_count: int = 0
 
         self._connection_state: ConnectionState = None  # pyright: ignore[reportAttributeAccessIssue]
+        self._state_reason: str | None = None
         self._set_state(ConnectionState.CREATED)
 
     @property
@@ -364,6 +375,10 @@ class Connection:
 
             self._set_state(ConnectionState.ESTABLISHING_CONNECTION)
             self._logger.info("Connecting to device")
+            # Clear any ghost connection BlueZ is still holding for this
+            # device (e.g. left over from a bad disconnect); otherwise new
+            # connection attempts can be refused until the adapter is reset.
+            await close_stale_connections_by_address(self.ble_dev().address)
             # max_attempts=0 means unlimited at Connection level, but
             # establish_connection needs a real retry count for BLE-level
             # attempts (e.g. when adapter slots are contested).
@@ -391,8 +406,7 @@ class Connection:
             self._set_state(ConnectionState.ERROR_BLEAK, e)
 
         if error is not None:
-            if self._client is not None and self._client.is_connected:
-                await self._client.disconnect()
+            await self._disconnect_client()
 
             self._logger.error("Failed to connect to the device: %s", error)
             self._last_errors.append(f"Failed to connect to the device: {error}")
@@ -409,7 +423,10 @@ class Connection:
         await self.initBleSessionKey()
 
     def disconnected(self, *args, **kwargs) -> None:
-        self._logger.warning("Disconnected from device")
+        # Traces the trigger: an unsolicited bleak drop shows bleak/asyncio frames here,
+        # whereas a drop we requested shows our own `disconnect` chain.
+        trigger = caller_chain()
+        self._logger.warning("Disconnected from device (%s)", trigger)
         self._client = None
 
         # Reset frame-level state that's tied to the just-killed BLE link.
@@ -454,7 +471,7 @@ class Connection:
             self._disconnected.set()
             if self._state is not ConnectionState.DISCONNECTING:
                 self._notify_disconnect()
-            self._set_state(ConnectionState.DISCONNECTED)
+            self._set_state(ConnectionState.DISCONNECTED, reason=trigger)
             return
 
         if self._reconnect_task is not None:
@@ -523,31 +540,62 @@ class Connection:
         self._set_state(ConnectionState.RECONNECTING)
         await self.connect()
 
-    async def disconnect(self) -> None:
-        self._logger.info(msg="Disconnecting from device")
+    async def _disconnect_client(self) -> None:
+        if self._client is None or not self._client.is_connected:
+            return
+        trigger = caller_chain()
+        self._logger.debug("Disconnecting BLE client (%s)", trigger)
+        outcome = "ok"
+        try:
+            async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                await self._client.disconnect()
+        except (EOFError, BleakError) as e:
+            outcome = f"already_down: {e}"
+            self._logger.warning("Disconnect failed (already down): %s", e)
+        except TimeoutError:
+            outcome = "timeout"
+            self._logger.warning(
+                "BleakClient.disconnect() did not return within %ss (%s); continuing "
+                "with local cleanup (write-with-response likely still pending after a "
+                "mid-auth BLE drop)",
+                DISCONNECT_TIMEOUT,
+                trigger,
+            )
+        except (OSError, RuntimeError) as e:
+            outcome = f"transport_broken: {e}"
+            self._logger.warning(
+                "BleakClient.disconnect() raised %s (%s); the BLE transport is broken, "
+                "continuing with local cleanup",
+                type(e).__name__,
+                trigger,
+            )
+        self._disconnect_log.append(
+            {"time": time.time(), "trigger": trigger, "outcome": outcome}
+        )
+
+    @property
+    def disconnect_log(self) -> list[dict[str, Any]]:
+        """Recent BLE client disconnect outcomes, for diagnostics"""
+        return list(self._disconnect_log)
+
+    async def disconnect(self, reason: str | None = None) -> None:
+        self._logger.info("Disconnecting from device (%s)", reason or "no reason given")
         self._retry_on_disconnect = False
 
         self._reconnect_attempt = 0
         self._cancel_tasks()
 
         if self._client is not None and self._client.is_connected:
-            self._set_state(ConnectionState.DISCONNECTING)
-            try:
-                await self._client.disconnect()
-            except (EOFError, BleakError) as e:
-                self._logger.debug("Disconnect failed (already down): %s", e)
+            self._set_state(ConnectionState.DISCONNECTING, reason=reason)
+            await self._disconnect_client()
 
         self._client = None
         if self._state == ConnectionState.DISCONNECTING:
-            self._set_state(ConnectionState.DISCONNECTED)
+            self._set_state(ConnectionState.DISCONNECTED, reason=reason)
 
     async def _disconnect_error(self, state: ConnectionState, exc: Exception):
         self._set_state(state, exc)
-        if self._client is not None and self._client.is_connected:
-            try:
-                await self._client.disconnect()
-            except (EOFError, BleakError) as e:
-                self._logger.debug("Disconnect failed (already down): %s", e)
+        await self._disconnect_client()
         raise exc
 
     @staticmethod
@@ -648,10 +696,7 @@ class Connection:
             self._set_state(ConnectionState.ERROR_TOO_MANY_ERRORS, exception)
             if self._client is not None and self._client.is_connected:
                 self._logger.warning("Client disconnected after encountering 5 errors")
-                try:
-                    await self._client.disconnect()
-                except (EOFError, BleakError) as e:
-                    self._logger.debug("Disconnect failed (already down): %s", e)
+                await self._disconnect_client()
 
     def _reset_error_counter(self):
         self._errors = 0
@@ -668,17 +713,30 @@ class Connection:
         self._state_changed.clear()
         self._listeners.on_connection_state_change(value)
 
+    @property
+    def state_reason(self) -> str | None:
+        return self._state_reason
+
     def _set_state(
-        self, state: ConnectionState, exc: Exception | type[Exception] | None = None
+        self,
+        state: ConnectionState,
+        exc: Exception | type[Exception] | None = None,
+        reason: str | None = None,
     ):
         self._state_exception = exc
         if exc is not None:
             self._last_exception = exc
 
+        self._state_reason = reason
         self._state = state
 
         if state.is_error:
             self._notify_disconnect(exc)
+
+    def set_state(
+        self, state: ConnectionState, exc: Exception | type[Exception] | None = None
+    ) -> None:
+        self._set_state(state, exc)
 
     def _get_characteristics(self, char_type: Literal["write", "notify"]):
         assert self._client is not None
@@ -805,6 +863,17 @@ class Connection:
             try:
                 await self._sendRequest(send_data, response_handler)
             except Exception as e:  # noqa: BLE001
+                if self._client is None or not self._client.is_connected:
+                    # The BLE link dropped mid-request - e.g. BlueZ raising "Remote peer
+                    # disconnected" synchronously from start_notify. bleak does not
+                    # always fire its disconnected callback for a synchronous GATT
+                    # failure, so nothing else would drive a reconnect and
+                    # `wait_until_authenticated_or_error` hangs forever.
+                    self._logger.warning(
+                        "BLE link lost while sending request (%s); reconnecting", e
+                    )
+                    self.disconnected()
+                    return
                 self._logger.log_filtered(
                     LogOptions.CONNECTION_DEBUG,
                     (
@@ -891,10 +960,21 @@ class Connection:
         self._add_task(self.sendPacket(reply_packet))
 
     async def initBleSessionKey(self):
-        if self._encrypt_type == 1:
-            await self._type_1_session()
-        else:
-            await self._ecdh_key_exchange()
+        match self._encrypt_type:
+            case 0:
+                await self._type_0_session()
+            case 1:
+                await self._type_1_session()
+            case _:
+                await self._ecdh_key_exchange()
+
+    async def _type_0_session(self):
+        self._encryption = None
+
+        await self._start_notify(self.listenForDataHandler)
+
+        await self.send_auth_status_packet()
+        await self.autoAuthentication()
 
     async def _type_1_session(self):
         session_key = hashlib.md5(self._dev_sn.encode()).digest()
@@ -993,6 +1073,7 @@ class Connection:
 
         # Parse the data that contains sRand (first 16 bytes) & seed (last 2 bytes)
         session_key = await self.genSessionKey(data[16:18], data[:16])
+        self._initial_session_key = self._encryption.session_key
         self._encryption = Type7Encryption(session_key, self._encryption.iv)
 
         await self.getAuthStatus()
@@ -1071,8 +1152,7 @@ class Connection:
         self._logger.error("Authentication failed, packet: %s", packet, exc_info=exc)
         self._set_state(ConnectionState.ERROR_AUTH_FAILED, exc)
 
-        if self._client is not None and self._client.is_connected:
-            await self._client.disconnect()
+        await self._disconnect_client()
         raise exc
 
     async def send_auth_status_packet(self):
@@ -1101,14 +1181,24 @@ class Connection:
         self._reset_error_counter()
 
         for packet in packets:
+            if self._client is None:
+                self._logger.log_filtered(
+                    LogOptions.CONNECTION_DEBUG,
+                    "Dropping buffered packet after disconnect: %r",
+                    packet,
+                )
+                return
+
             processed = False
 
-            # Handling autoAuthentication response
-            if (
+            is_auth_reply = (
                 packet.src == self._auth_header_dst
                 and packet.cmd_set == 0x35
                 and packet.cmd_id == 0x86
-            ):
+            )
+            authenticating = self._state == ConnectionState.AUTHENTICATING
+
+            if is_auth_reply and authenticating:
                 await self._check_auth(packet)
                 self._connection_attempt = 0
                 self._reconnect_attempt = 0
@@ -1121,6 +1211,13 @@ class Connection:
                 self._set_state(ConnectionState.AUTHENTICATED)
                 self._connected.set()
             else:
+                if authenticating and not is_auth_reply:
+                    self._connection_attempt = 0
+                    self._reconnect_attempt = 0
+                    self._logger.info("Auth completed - first data packet received")
+                    self._set_state(ConnectionState.AUTHENTICATED)
+                    self._connected.set()
+
                 try:
                     # Processing the packet with specific device
                     processed = await self._data_parse(packet)
@@ -1135,6 +1232,8 @@ class Connection:
 
     def _create_frame_assembler(self):
         match self._encrypt_type:
+            case 0:
+                return PassthroughAssembler()
             case 1:
                 return RawHeaderAssembler(self._encryption)
             case 7:
