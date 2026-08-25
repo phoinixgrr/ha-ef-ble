@@ -1,21 +1,7 @@
 import sys, types, asyncio, importlib.util, time
 
-ha = types.ModuleType("homeassistant"); ha.__path__ = []
-core = types.ModuleType("homeassistant.core")
-class HomeAssistant: pass
-core.HomeAssistant = HomeAssistant
-helpers = types.ModuleType("homeassistant.helpers"); helpers.__path__ = []
-ac = types.ModuleType("homeassistant.helpers.aiohttp_client")
-ac.async_get_clientsession = lambda hass: None
-aio = types.ModuleType("aiohttp")
-class _CE(Exception): pass
-aio.ClientError = _CE
-aio.ClientSession = object
-aio.ClientTimeout = lambda **k: None
-for name, m in [("homeassistant", ha), ("homeassistant.core", core),
-                ("homeassistant.helpers", helpers),
-                ("homeassistant.helpers.aiohttp_client", ac), ("aiohttp", aio)]:
-    sys.modules[name] = m
+# Stubs live in harness so they cannot drift between suites. See test_heal.
+import harness  # noqa: F401
 
 spec = importlib.util.spec_from_file_location("efi", "mod_under_test.py")
 efi = importlib.util.module_from_spec(spec); spec.loader.exec_module(efi)

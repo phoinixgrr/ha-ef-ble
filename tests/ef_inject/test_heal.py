@@ -1,22 +1,10 @@
 import sys, types, asyncio, importlib.util, time
 
 # --- stub the HA / aiohttp surface the module imports -----------------------
-ha = types.ModuleType("homeassistant"); ha.__path__ = []
-core = types.ModuleType("homeassistant.core")
-class HomeAssistant: pass
-core.HomeAssistant = HomeAssistant
-helpers = types.ModuleType("homeassistant.helpers"); helpers.__path__ = []
-ac = types.ModuleType("homeassistant.helpers.aiohttp_client")
-ac.async_get_clientsession = lambda hass: None
-aio = types.ModuleType("aiohttp")
-class _CE(Exception): pass
-aio.ClientError = _CE
-aio.ClientSession = object
-aio.ClientTimeout = lambda **k: None
-for name, m in [("homeassistant", ha), ("homeassistant.core", core),
-                ("homeassistant.helpers", helpers),
-                ("homeassistant.helpers.aiohttp_client", ac), ("aiohttp", aio)]:
-    sys.modules[name] = m
+# Importing harness installs them. This used to be duplicated inline here, which meant
+# every new HA import in the integration had to be stubbed in three places and the
+# suites silently drifted apart on what "Home Assistant" looks like.
+import harness  # noqa: F401
 
 spec = importlib.util.spec_from_file_location("efi", "mod_under_test.py")
 efi = importlib.util.module_from_spec(spec); spec.loader.exec_module(efi)

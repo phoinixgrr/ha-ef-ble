@@ -33,16 +33,52 @@ import logging
 import os
 import struct
 import time
+from typing import NamedTuple
 
 import aiohttp
 
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 DOMAIN = "ef_inject"
 _LOGGER = logging.getLogger(__name__)
 
+# The YAML block (`ef_inject:` in configuration.yaml) is what owns the regulator and
+# takes no options. Declaring it explicitly keeps that valid now that the integration
+# also has a config flow, and silences the "no CONFIG_SCHEMA" deprecation path.
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+
+# Platforms carrying the knobs. Entities only; see async_setup_entry.
+PLATFORMS = [Platform.BUTTON, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
+# Fired once per status tick (5s) so entities refresh without polling.
+SIGNAL_UPDATE = f"{DOMAIN}_update"
+
+
+class EfInjectRuntime(NamedTuple):
+    """What the entity platforms are given.
+
+    `device_entry` is the DEVICE REGISTRY row for the Ultra, a frozen snapshot whose
+    only use is its `.id` at registration time. Never widen this to hold an ef_ble
+    DeviceBase: that object is replaced whenever the ef_ble entry reloads and the
+    abandoned one is permanently dead, so anything holding a reference regulates into
+    the void. The address is re-resolved on every send.
+    """
+
+    address: str
+    device_entry: dr.DeviceEntry
+
 TARGET_TITLE = "EF-60434"          # main Ultra
+# The config-entry TITLE is user-editable in the HA UI, so matching on it alone means
+# a rename silently kills the regulator: _device() would return None for ever and the
+# only symptom would be skipped_no_identity climbing. The BLE address is the entry's
+# unique_id and cannot be edited, so it is the stable identity and the fallback.
+TARGET_ADDRESS = "CC:BA:97:E3:3C:52"
 EXPECTED_SN = "ECE334EA86F8"       # the meter EcoFlow is bound to
 SHELLY_URL = "http://192.168.101.158/rpc/EM.GetStatus?id=0"
 
@@ -362,6 +398,82 @@ log = _LOGGER.warning
 dbg = _LOGGER.debug
 
 
+# ---------------------------------------------------------------------------
+# Locating the ef_ble config entry we regulate.
+#
+# Title first, because that is what this has always matched and it keeps today's
+# behaviour bit-for-bit. Address second, so a rename in the HA UI degrades to
+# "still works" instead of "silently stops regulating". getattr() because the test
+# harness's fake entry has no unique_id.
+# ---------------------------------------------------------------------------
+def find_ef_ble_entry(hass):
+    entries = hass.config_entries.async_entries("ef_ble")
+    for entry in entries:
+        if entry.title == TARGET_TITLE:
+            return entry
+    for entry in entries:
+        if getattr(entry, "unique_id", None) == TARGET_ADDRESS:
+            log(
+                "EFINJECT config entry %r not found; matched the Ultra by address %s "
+                "instead. Someone renamed the ef_ble entry.",
+                TARGET_TITLE, TARGET_ADDRESS,
+            )
+            return entry
+    return None
+
+
+# ---------------------------------------------------------------------------
+# The file knobs, as data.
+#
+# Every tuning knob is a file under /config, which is what makes them reachable from
+# a shell with no restart. The entity layer (number/switch/button) drives exactly
+# these same files rather than reaching into the Injector, so the UI and the shell go
+# through one validated path and produce one log line. See number.py.
+# ---------------------------------------------------------------------------
+FLAG_FILES = {
+    "stop": STOP_FILE,
+    "modbus": MODBUS_FILE,
+    "interleave": INTERLEAVE_FILE,
+    "shadow": SHADOW_FILE,
+    "quiet": QUIET_FILE,
+    "ab": AB_FILE,
+    "causation": CAUSATION_FILE,
+}
+
+
+def stat_flags():
+    """Blocking. Runs in the executor. One pass over every knob file."""
+    return {name: os.path.exists(path) for name, path in FLAG_FILES.items()}
+
+
+def write_text_atomic(path, text):
+    """Blocking. Runs in the executor.
+
+    Temp-file-and-rename, because the bias file is read at the poll rate and a
+    human's `echo` was never racing anything, but a UI control is. A truncated read
+    is already handled safely (unparseable -> REFUSED, previous value stands), so
+    this is about not manufacturing log noise, not about safety.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def set_flag_file(path, present):
+    """Blocking. Runs in the executor. Create or remove an existence-flag file."""
+    if present:
+        with open(path, "w") as f:
+            f.write("")
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 class ModbusMeter:
     """One persistent Modbus TCP connection to one Shelly Pro 3EM.
 
@@ -500,6 +612,10 @@ class Injector:
         # bias accounting
         self.biased = 0             # sends that carried the import cushion
         self.bias_idle = 0          # sends with bias suppressed (not discharging)
+        # Last bias ACTUALLY applied, after the proximity fade, as opposed to `bias_w`
+        # which is the configured ceiling. Stored only so the entity layer can show it:
+        # nothing in the loop reads it back, so it can never influence regulation.
+        self.bias_applied = 0
         self._recent_local = []     # rolling local grid samples, for effect reporting
         # event-driven re-assert
         self._wake = asyncio.Event()
@@ -544,6 +660,10 @@ class Injector:
         self._interleave_file_seen = None   # None = never looked, for edge detect
         self.fresh_ms_sum = 0.0         # staleness of the value we injected
         self.fresh_ms_n = 0
+        # The most recent sample, not the running mean. A session mean flattens out
+        # after a few thousand writes and would hide a transport regression happening
+        # right now, which is the only reason to look at this number at all.
+        self.fresh_ms_last = None
         self._src_change_ts = 0.0       # when the value we just read was published
         # poll/write decoupling
         self._last_src_w = None         # meter value at the last write
@@ -559,13 +679,16 @@ class Injector:
         self._bias_next_check = 0.0     # throttle for the executor read
         self.bias_overrides = 0         # accepted runtime changes
         self.bias_rejected = 0          # refused values (typo, positive, oversized)
+        # Last observed state of the knob FILES, refreshed once per status tick in the
+        # executor. The entity layer reads this dict instead of calling os.path.exists
+        # in a property: entity properties run on the event loop and are read often,
+        # and a 5s-old view of a knob a human turns is indistinguishable from a live one.
+        self.flags = {}
 
     # -- device -------------------------------------------------------------
     def _device(self):
-        for entry in self.hass.config_entries.async_entries("ef_ble"):
-            if entry.title == TARGET_TITLE:
-                return getattr(entry, "runtime_data", None)
-        return None
+        entry = find_ef_ble_entry(self.hass)
+        return getattr(entry, "runtime_data", None) if entry is not None else None
 
     def _attach(self, device):
         """Point the message listener at `device`, detaching from any previous one."""
@@ -1480,6 +1603,7 @@ class Injector:
                         self.biased += 1
                     else:
                         self.bias_idle += 1
+                self.bias_applied = bias
 
                 val = int(round(w + bias))
                 if abs(val) > MAX_ABS_W:
@@ -1516,10 +1640,10 @@ class Injector:
                     # meter published it. This is the metric the interleave is meant to
                     # improve, so record it rather than asserting the improvement.
                     if self._src_change_ts:
-                        self.fresh_ms_sum += (
-                            self._last_send_ts - self._src_change_ts
-                        ) * 1000
+                        fresh_ms = (self._last_send_ts - self._src_change_ts) * 1000
+                        self.fresh_ms_sum += fresh_ms
                         self.fresh_ms_n += 1
+                        self.fresh_ms_last = fresh_ms
                     self._recent_sent.append((self._last_send_ts, self.last_sent_w))
                     # If this write was prompted by a detected cloud overwrite, record
                     # how long the cloud's value was actually exposed.
@@ -1679,6 +1803,14 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data[DOMAIN] = inj
 
     async def _status_updater(_now=None):
+        # Refresh the knob-file view once, in the executor, and hand it to the entity
+        # layer. Deliberately failure-tolerant: a stat error must not be able to stop
+        # the status tick, which is the only thing keeping sensor.ef_inject_status alive.
+        try:
+            inj.flags = await hass.async_add_executor_job(stat_flags)
+        except Exception:
+            _LOGGER.exception("EFINJECT could not stat the knob files")
+
         hass.states.async_set(
             "sensor.ef_inject_status",
             "running" if inj.running else "stopped",
@@ -1719,7 +1851,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "target": TARGET_TITLE,
                 "meter_sn": EXPECTED_SN,
                 "transport": inj.transport,
-                "modbus_enabled": os.path.exists(MODBUS_FILE),
+                "modbus_enabled": inj.flags.get("modbus", False),
                 "mb_reads": inj._mb.reads,
                 "mb_err": inj._mb.err,
                 "mb_reopens": inj._mb.reopens,
@@ -1765,6 +1897,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "guard_recoveries_recent": inj._recent_recoveries(),
             },
         )
+        # Wake the entities on the same 5s cadence. After async_set, so an entity that
+        # reads inj.flags sees the same view the attributes were built from.
+        async_dispatcher_send(hass, SIGNAL_UPDATE)
 
     async def _boot():
         # let ef_ble connect and start streaming first
@@ -1775,4 +1910,66 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             await asyncio.sleep(5)
 
     hass.async_create_background_task(_boot(), "ef_inject_boot")
+
+    # Ask for the UI entry. It carries NOTHING but entities: the regulator above is
+    # already running by this point and never consults it, so a failed, deleted or
+    # broken entry cannot affect regulation. Single-instance via the unique_id in
+    # config_flow, so restarts do not accumulate entries.
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_IMPORT})
+    )
     return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up the entity layer. Regulation does not pass through here."""
+    if hass.data.get(DOMAIN) is None:
+        # async_setup owns the Injector and runs first, so this is a genuine anomaly
+        # rather than an ordering race. Retry rather than fail: the knobs are worth
+        # having even if the YAML block was added late.
+        raise ConfigEntryNotReady("ef_inject YAML setup has not created the Injector")
+
+    ble_entry = find_ef_ble_entry(hass)
+    address = getattr(ble_entry, "unique_id", None) or TARGET_ADDRESS
+
+    # The knobs belong on the Ultra's own device page, next to the controls they
+    # override. Getting there needs care on HA 2026.8: a device belongs to exactly ONE
+    # config entry (DeviceEntry.config_entry_id) and identifiers are unique PER ENTRY,
+    # so declaring ef_ble's identifiers in DeviceInfo does not join their device, it
+    # forges a nameless second one. Observed doing exactly that on 2026.8.3.
+    #
+    # The supported route is one level down: an entity may point at ANY device row, so
+    # the entities carry no device_info at all and pre-set `device_entry` instead
+    # (entity_platform honours a pre-set device_entry when device_info is None; see
+    # components/template/entity.py for the same pattern). We therefore own no device.
+    dev_reg = dr.async_get(hass)
+    ble_device = dev_reg.async_get_device(identifiers={("ef_ble", address)})
+    if ble_device is None:
+        # ef_ble registers the device once the Ultra connects. HA's own retry backoff
+        # covers the ~45s BLE boot window, so no polling loop is needed here.
+        raise ConfigEntryNotReady(
+            f"ef_ble device {address} is not in the device registry yet"
+        )
+
+    entry.runtime_data = EfInjectRuntime(address=address, device_entry=ble_device)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Self-heal: this entry must own NO devices. Earlier builds owned one (first a
+    # nameless clone of ef_ble's identifiers, then a "Zero-export regulator" service
+    # device), and the forward above has just moved every entity off it, so whatever is
+    # left here is empty. Safe by construction rather than by pattern matching: the list
+    # is scoped to THIS entry, and since config_entry_id is singular the Ultra's own
+    # device belongs to ef_ble's entry and can never appear in it.
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        log(
+            "EFINJECT removing leftover device %s (%s) from an earlier layout; the "
+            "knobs now live on the Ultra's own device %s",
+            device.id, device.name or "unnamed", ble_device.id,
+        )
+        dev_reg.async_remove_device(device.id)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload the entity layer. The regulator keeps running; it is not ours to stop."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

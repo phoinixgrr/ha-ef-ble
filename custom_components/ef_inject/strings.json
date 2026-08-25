@@ -1,0 +1,74 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EcoFlow zero-export controls",
+        "description": "Adds the zero-export regulator's controls to the Ultra's device page. There is nothing to configure here; the regulator itself is set up in configuration.yaml."
+      }
+    },
+    "abort": {
+      "already_configured": "The injection controls are already set up."
+    }
+  },
+  "entity": {
+    "number": {
+      "bias": {
+        "name": "Zero export offset"
+      }
+    },
+    "switch": {
+      "regulation": {
+        "name": "Zero export"
+      },
+      "modbus": {
+        "name": "Fast meter link (Modbus)"
+      },
+      "interleave": {
+        "name": "Second meter cross-check"
+      },
+      "shadow": {
+        "name": "Second meter, watch only"
+      },
+      "quiet": {
+        "name": "Fewer log messages"
+      },
+      "ab": {
+        "name": "A/B test (pauses zero export)"
+      }
+    },
+    "button": {
+      "bias_reset": {
+        "name": "Zero export offset reset"
+      },
+      "causation": {
+        "name": "Causation test (pauses zero export)"
+      }
+    },
+    "sensor": {
+      "cushion": {
+        "name": "Target grid import"
+      },
+      "bias_in_force": {
+        "name": "Offset in force"
+      },
+      "guard": {
+        "name": "Cross-check status"
+      },
+      "bias_applied": {
+        "name": "Offset applied now"
+      },
+      "transport": {
+        "name": "Meter link"
+      },
+      "freshness": {
+        "name": "Injected value age"
+      },
+      "cloud_overwrites": {
+        "name": "Cloud overwrites"
+      },
+      "write_errors": {
+        "name": "Write failures"
+      }
+    }
+  }
+}

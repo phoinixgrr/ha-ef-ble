@@ -19,9 +19,38 @@ class _CE(Exception): pass
 _aio.ClientError = _CE
 _aio.ClientSession = object
 _aio.ClientTimeout = lambda **k: None
+
+# The entity layer (number/switch/button/sensor) drags a few more HA imports into the
+# module under test. None of them are exercised offline: the platforms are never loaded
+# here, and async_setup_entry needs a real config entry. They only have to EXIST so the
+# regulator can be imported at all, which is what these suites actually test.
+_ce = types.ModuleType("homeassistant.config_entries")
+_ce.SOURCE_IMPORT = "import"
+class ConfigEntry: pass
+_ce.ConfigEntry = ConfigEntry
+_const = types.ModuleType("homeassistant.const")
+class Platform:
+    BUTTON = "button"; NUMBER = "number"; SENSOR = "sensor"; SWITCH = "switch"
+_const.Platform = Platform
+_exc = types.ModuleType("homeassistant.exceptions")
+class ConfigEntryNotReady(Exception): pass
+_exc.ConfigEntryNotReady = ConfigEntryNotReady
+_cv = types.ModuleType("homeassistant.helpers.config_validation")
+_cv.empty_config_schema = lambda domain: None
+_dr = types.ModuleType("homeassistant.helpers.device_registry")
+_dr.async_get = lambda hass: None
+_disp = types.ModuleType("homeassistant.helpers.dispatcher")
+_disp.async_dispatcher_send = lambda hass, signal, *a: None
+
 for _n, _m in [("homeassistant", _ha), ("homeassistant.core", _core),
                ("homeassistant.helpers", _helpers),
-               ("homeassistant.helpers.aiohttp_client", _ac), ("aiohttp", _aio)]:
+               ("homeassistant.helpers.aiohttp_client", _ac), ("aiohttp", _aio),
+               ("homeassistant.config_entries", _ce),
+               ("homeassistant.const", _const),
+               ("homeassistant.exceptions", _exc),
+               ("homeassistant.helpers.config_validation", _cv),
+               ("homeassistant.helpers.device_registry", _dr),
+               ("homeassistant.helpers.dispatcher", _disp)]:
     sys.modules[_n] = _m
 
 
