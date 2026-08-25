@@ -163,15 +163,29 @@ class EfInjectBiasApplied(EfInjectEntity, SensorEntity):
 
 
 class EfInjectTransport(EfInjectEntity, SensorEntity):
-    """Which path the meter reading came in by, verbatim from the log's `via=` field.
+    """Which path the meter reading came in by: `modbus`, `http-fallback` or `http`.
 
     The interesting value is the one nobody wants to see: `http-fallback` means the
     Modbus path failed and every injection is now riding a slower, coarser read. That
     degradation is otherwise invisible, because regulation keeps working.
 
-    Deliberately NOT an enum device class. The strings come from the regulator
-    (`modbus:` plus the source it bound to), so pinning a fixed options list here would
-    make any future source name show up as an invalid state instead of as itself.
+    The regulator's `via=` field is `modbus:bound` / `modbus:grid`, and the suffix is
+    dropped here on purpose. It names WHICH of the two meters won the freshness race on
+    that cycle, which with the cross-check enabled alternates at roughly 1Hz, so
+    reporting it verbatim made this sensor flip continuously and read as a flapping
+    link when the link had never changed.
+
+    It is not in the attributes either, and that is the second half of the same lesson:
+    the recorder writes a states row when the ATTRIBUTES change, not just the state, so
+    parking a value that moves every tick in an attribute costs exactly as many rows as
+    a state would (measured: 36 attribute-only rows in 3 minutes). Only values that move
+    when something has actually happened belong here. The per-cycle winner stays where
+    it costs nothing: the `via=` field of the log, and the `second_meter_used` attribute
+    on `sensor.ef_inject_status`, which is written every 5s regardless.
+
+    Deliberately NOT an enum device class. The strings come from the regulator, so
+    pinning a fixed options list here would make any future transport name show up as
+    an invalid state rather than as itself.
     """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -182,7 +196,19 @@ class EfInjectTransport(EfInjectEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return self._inj.transport
+        via = self._inj.transport
+        return None if via is None else via.split(":", 1)[0]
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Only counters that stand still while the link is healthy. See the note above:
+        anything that ticks here costs a recorder row every 5s."""
+        inj = self._inj
+        return {
+            "modbus_errors": inj._mb.err,
+            "modbus_reopens": inj._mb.reopens,
+            "second_meter_errors": inj._mb2.err,
+        }
 
 
 class EfInjectFreshness(EfInjectEntity, SensorEntity):

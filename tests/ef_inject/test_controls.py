@@ -446,7 +446,37 @@ ck(
     metrics["bias_applied"].native_value != inj.bias_w,
     "and is not the configured ceiling, which is the whole reason it exists",
 )
-ck(metrics["transport"].native_value == "http-fallback", "the transport is passed through verbatim")
+ck(
+    metrics["transport"].native_value == "http-fallback",
+    "the transport reports the link when there is no meter suffix to strip",
+)
+# The suffix names which meter won the freshness race, which alternates at ~1Hz with
+# the cross-check on. Reporting it as the STATE made the sensor look like a flapping
+# link and cost a recorder row every 5s to say nothing changed.
+inj.transport = "modbus:grid"
+ck(
+    metrics["transport"].native_value == "modbus",
+    "the per-cycle meter suffix is stripped, so the link state is stable  <-- was a bug",
+)
+inj.transport = "modbus:bound"
+ck(
+    metrics["transport"].native_value == "modbus",
+    "and the state does not move when only the winning meter changes",
+)
+# And the suffix is not smuggled into an attribute either: the recorder writes a row on
+# any ATTRIBUTE change too, so a value that moves every tick costs the same there as it
+# does in the state. Every attribute on this sensor must stand still while healthy.
+attrs = metrics["transport"].extra_state_attributes
+volatile = {"via", "last_meter", "second_meter_used", "sec_used"}
+ck(
+    not (volatile & set(attrs)),
+    f"no per-tick value hides in the attributes (found: {sorted(volatile & set(attrs))})",
+)
+ck(
+    set(attrs) == {"modbus_errors", "modbus_reopens", "second_meter_errors"},
+    "the attributes are exactly the counters that move only when something breaks",
+)
+inj.transport = "http-fallback"
 ck(
     metrics["freshness"].native_value is None,
     "freshness is unknown before the first write, NOT 0ms",
