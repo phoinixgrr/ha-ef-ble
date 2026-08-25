@@ -193,15 +193,14 @@
           "extra_battery": "Увімкнені додаткові батареї"
         }
       },
-      "connect": {
+      "connecting": {
         "title": "Підключення до пристрою"
       }
     },
     "progress": {
-      "connecting": "Встановлення Bluetooth-з'єднання з {name}...",
-      "exchanging_keys": "З'єднано з {name}, обмін ключами шифрування...",
-      "authenticating": "Автентифікація з {name}...",
-      "finalizing": "Завершення перевірки з'єднання..."
+      "connecting": "Підключення до пристрою...",
+      "authenticating": "Підключення успішне, виконання процедури автентифікації...",
+      "disconnecting": "Успіх! Відключення від пристрою..."
     }
   },
   "options": {
@@ -286,9 +285,6 @@
     },
     "failed_after_successful_connection": {
       "message": "Пристрій підключився, але не дійшов до процедури автентифікації, останній стан: {last_state}"
-    },
-    "missing_address_or_user_id": {
-      "message": "У збереженій конфігурації відсутні дані пристрою ({missing}). Видаліть пристрій і додайте його знову, щоб виправити запис конфігурації."
     }
   },
   "issues": {
@@ -346,9 +342,6 @@
       "grid_status": {
         "name": "Статус мережі"
       },
-      "grid_is_energized": {
-        "name": "Мережа під напругою"
-      },
       "bms_run_state": {
         "name": "Стан роботи BMS"
       },
@@ -357,9 +350,6 @@
       },
       "backup_force_charge": {
         "name": "Канал {channel} Примусове заряджання"
-      },
-      "backup_channel_signal_line": {
-        "name": "Канал {channel} сигнальна лінія"
       },
       "is_charging": {
         "name": "Заряджається"
@@ -389,12 +379,6 @@
       },
       "battery_level": {
         "name": "Рівень заряду батареї"
-      },
-      "lcd_battery_level": {
-        "name": "Рівень заряду батареї LCD"
-      },
-      "bms_battery_level": {
-        "name": "Рівень заряду батареї BMS"
       },
       "battery_time_remaining": {
         "name": "Залишок часу роботи батареї"
@@ -487,9 +471,6 @@
       },
       "circuit_current": {
         "name": "Струм контуру {index}"
-      },
-      "circuit_voltage": {
-        "name": "Напруга контуру {index}"
       },
       "channel_power": {
         "name": "Потужність каналу {index}"
@@ -595,12 +576,6 @@
       },
       "cell_temperature": {
         "name": "Температура елементів"
-      },
-      "max_cell_voltage": {
-        "name": "Макс. напруга елемента"
-      },
-      "min_cell_voltage": {
-        "name": "Мін. напруга елемента"
       },
       "dc_port_input_power": {
         "name": "Вхідна потужність порту DC"
@@ -938,29 +913,6 @@
       },
       "ac_c20_in_type": {
         "name": "Тип входу AC C20"
-      },
-      "circuit_status": {
-        "name": "Стан контуру {index}",
-        "state": {
-          "unknown": "Невідомо",
-          "off": "Вимкнено",
-          "on_grid": "Увімкнено (мережа)",
-          "on_back": "Увімкнено (резерв)",
-          "em_stop": "Аварійна зупинка"
-        }
-      },
-      "circuit_name": {
-        "name": "Назва контуру {index}"
-      },
-      "backup_channel_type": {
-        "name": "Тип каналу {channel}",
-        "state": {
-          "unknown": "Невідомо",
-          "none": "Немає",
-          "battery": "Акумулятор",
-          "oil": "Розумний генератор",
-          "station_charger": "Зарядна станція"
-        }
       }
     },
     "select": {
@@ -1009,14 +961,6 @@
           "self_powered": "Автономне живлення",
           "scheduled": "Заплановані завдання",
           "intelligent": "Інтелектуальний розклад"
-        }
-      },
-      "dc_mode": {
-        "name": "Режим DC",
-        "state": {
-          "auto": "Авто",
-          "solar": "Сонячна панель",
-          "car": "Автомобіль"
         }
       },
       "energy_strategy": {
@@ -1108,9 +1052,6 @@
       },
       "channel_is_enabled": {
         "name": "Канал {channel}"
-      },
-      "storm_guard": {
-        "name": "Захист від шторму"
       },
       "ch_force_charge": {
         "name": "Канал {channel} Примусове заряджання"

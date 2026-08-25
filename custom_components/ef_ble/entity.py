@@ -3,7 +3,6 @@ from collections.abc import Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from homeassistant.core import callback
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity import Entity, EntityDescription
 
@@ -18,7 +17,6 @@ class EcoflowEntity(Entity):
     def __init__(self, device: DeviceBase):
         self._device = device
         self._update_callbacks: list[tuple[str, Callable[[Any], None]]] = []
-        self._write_state_props: list[str] = []
 
     @property
     def device_info(self):
@@ -46,25 +44,12 @@ class EcoflowEntity(Entity):
 
     def _register_update_callback(
         self,
-        entity_attr: str | None,
+        entity_attr: str,
         prop_name: str | None,
         get_state: Callable[[Any], SkipWrite | Any] = lambda x: x,
         default_state: Any = None,
     ):
-        """
-        Bind a device property to this entity for the lifetime of the entity
-
-        With `entity_attr`, every property update is written to that attribute (mapped
-        through `get_state`) and pushed to HA immediately. With `entity_attr=None`, the
-        update only triggers a state write through the device's update-period throttle,
-        for entities that read the property live (e.g. in `native_value` or state
-        attributes).
-        """
         if prop_name is None or not hasattr(self._device, prop_name):
-            return
-
-        if entity_attr is None:
-            self._write_state_props.append(prop_name)
             return
 
         @callback
@@ -86,15 +71,11 @@ class EcoflowEntity(Entity):
     async def async_added_to_hass(self) -> None:
         for prop, state_callback in self._update_callbacks:
             self._device.register_state_update_callback(state_callback, prop)
-        for prop in self._write_state_props:
-            self._device.register_callback(self.async_write_ha_state, prop)
         await super().async_added_to_hass()
 
     async def async_will_remove_from_hass(self) -> None:
         for prop, state_callback in self._update_callbacks:
             self._device.remove_state_update_callback(state_callback, prop)
-        for prop in self._write_state_props:
-            self._device.remove_callback(self.async_write_ha_state, prop)
         await super().async_will_remove_from_hass()
 
 
@@ -106,11 +87,10 @@ class EcoflowBatteryAddonEntity(EcoflowEntity):
     ) -> None:
         super().__init__(device)
         self._battery_index = battery_index
-        self._sn_prop = f"battery_{battery_index}_sn"
 
     @property
     def device_info(self) -> DeviceInfo:
-        battery_sn = getattr(self._device, self._sn_prop, None)
+        battery_sn = getattr(self._device, f"battery_{self._battery_index}_sn", None)
         battery_model = battery_name_from_device(self._device, self._battery_index)
 
         return DeviceInfo(
@@ -122,41 +102,6 @@ class EcoflowBatteryAddonEntity(EcoflowEntity):
             model=battery_model,
             serial_number=battery_sn,
             via_device=(DOMAIN, self._device.address),
-        )
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        self._device.register_state_update_callback(
-            self._refresh_device_registry, self._sn_prop
-        )
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._device.remove_state_update_callback(
-            self._refresh_device_registry, self._sn_prop
-        )
-        await super().async_will_remove_from_hass()
-
-    @callback
-    def _refresh_device_registry(self, battery_sn: str | None) -> None:
-        """Push a late-arriving battery serial number into the device registry"""
-        if not battery_sn:
-            return
-
-        registry = dr.async_get(self.hass)
-        identifier = (DOMAIN, f"{self._device.address}_battery_{self._battery_index}")
-        device_entry = registry.async_get_device(identifiers={identifier})
-        if device_entry is None:
-            return
-
-        battery_model = battery_name_from_device(self._device, self._battery_index)
-        if (
-            device_entry.serial_number == battery_sn
-            and device_entry.model == battery_model
-        ):
-            return
-
-        registry.async_update_device(
-            device_entry.id, serial_number=battery_sn, model=battery_model
         )
 
 
@@ -194,14 +139,11 @@ def resolve_entity_description_keys[D: EntityDescription](
             placeholders = v.translation_placeholders
             if placeholders:
                 placeholders = {pk: pv.format(n=i) for pk, pv in placeholders.items()}
-            replacements: dict[str, Any] = {
-                "key": actual_key,
-                "indexed_range": None,
-                "translation_placeholders": placeholders,
-            }
-            name_field = getattr(v, "name_field", None)
-            if name_field and "{n}" in name_field:
-                replacements["name_field"] = name_field.replace("{n}", str(i))
-            result[actual_key] = dataclasses.replace(v, **replacements)
+            result[actual_key] = dataclasses.replace(
+                v,
+                key=actual_key,
+                indexed_range=None,
+                translation_placeholders=placeholders,
+            )
 
     return result

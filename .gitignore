@@ -3,3 +3,11 @@ custom_components/ef_ble/eflib/pb/*.pyi
 ha_ef_ble.egg-info/
 uv.lock
 AGENTS.md
+
+# Runtime artifacts the integration writes on the live box. They show up in any
+# snapshot pulled off homeassistant.home and are not source.
+custom_components/ef_ble/.diagnostics/
+custom_components/ef_ble/eflib/.cache/
+__pycache__/
+.DS_Store
+._*

@@ -193,15 +193,14 @@
           "extra_battery": "Enabled Extra Batteries"
         }
       },
-      "connect": {
+      "connecting": {
         "title": "Connecting to device"
       }
     },
     "progress": {
-      "connecting": "Establishing Bluetooth connection to {name}...",
-      "exchanging_keys": "Connected to {name}, exchanging encryption keys...",
-      "authenticating": "Authenticating with {name}...",
-      "finalizing": "Finishing the connection check..."
+      "connecting": "Connecting to device...",
+      "authenticating": "Connection successful, running authentication procedure...",
+      "disconnecting": "Sucess! Disconnecting from device..."
     }
   },
   "options": {
@@ -286,9 +285,6 @@
     },
     "failed_after_successful_connection": {
       "message": "Device connected but did not get to auth procedure, last state: {last_state}"
-    },
-    "missing_address_or_user_id": {
-      "message": "Stored configuration is missing the device {missing}. Remove the device and add it again to repair the configuration entry."
     }
   },
   "issues": {
@@ -299,9 +295,6 @@
   },
   "entity": {
     "button": {
-      "power_off": {
-        "name": "Power Off"
-      },
       "unpause_solar": {
         "name": "Unpause Solar"
       }
@@ -346,12 +339,6 @@
       "storm_mode": {
         "name": "Storm Mode"
       },
-      "grid_is_energized": {
-        "name": "Grid Energized"
-      },
-      "backup_channel_signal_line": {
-        "name": "Channel {channel} Signal Line"
-      },
       "grid_status": {
         "name": "Grid Status"
       },
@@ -392,12 +379,6 @@
       },
       "battery_level": {
         "name": "Battery Level"
-      },
-      "lcd_battery_level": {
-        "name": "LCD Battery Level"
-      },
-      "bms_battery_level": {
-        "name": "BMS Battery Level"
       },
       "battery_time_remaining": {
         "name": "Battery Time Remaining"
@@ -490,32 +471,6 @@
       },
       "circuit_current": {
         "name": "Circuit Current {index}"
-      },
-      "circuit_voltage": {
-        "name": "Circuit Voltage {index}"
-      },
-      "circuit_status": {
-        "name": "Circuit {index} Status",
-        "state": {
-          "unknown": "Unknown",
-          "off": "Off",
-          "on_grid": "On (Grid)",
-          "on_back": "On (Backup)",
-          "em_stop": "Emergency Stop"
-        }
-      },
-      "backup_channel_type": {
-        "name": "Channel {channel} Type",
-        "state": {
-          "unknown": "Unknown",
-          "none": "None",
-          "battery": "Battery",
-          "oil": "Smart Generator",
-          "station_charger": "Station Charger"
-        }
-      },
-      "circuit_name": {
-        "name": "Circuit {index} Name"
       },
       "channel_power": {
         "name": "Channel Power {index}"
@@ -621,12 +576,6 @@
       },
       "cell_temperature": {
         "name": "Cell Temperature"
-      },
-      "max_cell_voltage": {
-        "name": "Max Cell Voltage"
-      },
-      "min_cell_voltage": {
-        "name": "Min Cell Voltage"
       },
       "dc_port_input_power": {
         "name": "DC Port Input Power"
@@ -746,15 +695,6 @@
       },
       "load_from_pv": {
         "name": "Load From PV"
-      },
-      "bms_mos_temperature_max": {
-        "name": "BMS MOSFET Temperature (Max)"
-      },
-      "bms_mos_temperature_min": {
-        "name": "BMS MOSFET Temperature (Min)"
-      },
-      "inverter_target_power": {
-        "name": "Inverter Target Power"
       },
       "grid_connection_status": {
         "name": "Grid Connection Status",
@@ -973,6 +913,15 @@
       },
       "ac_c20_in_type": {
         "name": "AC C20 In Type"
+      },
+      "bms_mos_temperature_max": {
+        "name": "BMS MOSFET Temperature (Max)"
+      },
+      "bms_mos_temperature_min": {
+        "name": "BMS MOSFET Temperature (Min)"
+      },
+      "inverter_target_power": {
+        "name": "Inverter Target Power"
       }
     },
     "select": {
@@ -1099,6 +1048,9 @@
       },
       "dc_charging_max_amps_2": {
         "name": "DC (2) Charging Max Amps"
+      },
+      "inverter_target_power": {
+        "name": "Inverter Target Power"
       }
     },
     "climate": {
@@ -1126,9 +1078,6 @@
       },
       "eps_mode": {
         "name": "EPS Mode"
-      },
-      "storm_guard": {
-        "name": "Storm Guard"
       },
       "dc_ports": {
         "name": "DC Ports"

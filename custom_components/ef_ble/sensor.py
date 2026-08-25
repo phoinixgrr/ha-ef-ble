@@ -37,13 +37,11 @@ from .eflib.devices import (
     dpu,
     powerpulse_ev,
     shp2,
-    shp3,
     smart_generator,
     stream_microinverter,
     wave2,
     wave3,
 )
-from .eflib.entity import units
 from .eflib.props.enums import IntFieldValue
 from .entity import (
     EcoflowBatteryAddonEntity,
@@ -57,7 +55,6 @@ class EcoflowSensorEntityDescription[Device: DeviceBase](SensorEntityDescription
     state_attribute_fields: list[str] = field(default_factory=list)
     native_unit_of_measurement_field: str | Callable[[Device], str] | None = None
     indexed_range: range | None = None
-    name_field: str | None = None
 
 
 class _SensorKwargs(TypedDict, total=False):
@@ -66,7 +63,6 @@ class _SensorKwargs(TypedDict, total=False):
     indexed_range: range
     entity_category: EntityCategory
     state_attribute_fields: list[str]
-    name_field: str
 
 
 def battery(
@@ -214,12 +210,15 @@ def temperature(
     )
 
 
-def _wave_unit(dev: "wave2.Device | wave3.Device"):
-    return (
-        UnitOfTemperature.FAHRENHEIT
-        if dev.temp_unit in (units.Temperature.F, wave3.TemperatureUnit.FAHRENHEIT)
-        else UnitOfTemperature.CELSIUS
-    )
+def _wave_unit(dev: wave3.Device):
+    match dev:
+        case wave3.Device:
+            return (
+                UnitOfTemperature.FAHRENHEIT
+                if dev.temp_unit is wave3.TemperatureUnit.FAHRENHEIT
+                else UnitOfTemperature.CELSIUS
+            )
+    return UnitOfTemperature.CELSIUS
 
 
 def wave_temperature(
@@ -451,9 +450,7 @@ def port_error_code(
     )
 
 
-_circuit_range = range(
-    1, max(shp2.Device.NUM_OF_CIRCUITS, shp3.Device.NUM_OF_CIRCUITS) + 1
-)
+_shp2_circuit_range = range(1, shp2.Device.NUM_OF_CIRCUITS + 1)
 _shp2_channel_range = range(1, shp2.Device.NUM_OF_CHANNELS + 1)
 
 
@@ -480,7 +477,7 @@ def shp2_circuit(
     return fn(
         translation_key=translation_key,
         translation_placeholders=translation_placeholders or {"index": "{n:02d}"},
-        indexed_range=_circuit_range,
+        indexed_range=_shp2_circuit_range,
         **kwargs,
     )
 
@@ -503,26 +500,9 @@ _SENSORS: Final[dict[str, SensorEntityDescription]] = {
         "circuit_power",
         precision=2,
         translation_placeholders={"index": "{n:02d}"},
-        name_field="circuit_name_{n}",
     ),
     "circuit_current_{n}": shp2_circuit(
         current, "circuit_current", precision=2, enabled=False, state_class=None
-    ),
-    "circuit_voltage_{n}": shp2_circuit(
-        voltage, "circuit_voltage", precision=1, enabled=False
-    ),
-    "circuit_status_{n}": shp2_circuit(
-        enum,
-        "circuit_status",
-        options=shp3.CircuitStatus,
-        name_field="circuit_name_{n}",
-    ),
-    "ch{n}_type": enum(
-        options=shp3.BackupChannelType,
-        translation_key="backup_channel_type",
-        translation_placeholders={"channel": "{n}"},
-        indexed_range=range(1, shp3.Device.NUM_OF_CHANNELS + 1),
-        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     "channel_power_{n}": shp2_channel(
         power,
@@ -712,10 +692,7 @@ _SENSORS: Final[dict[str, SensorEntityDescription]] = {
         entity_category=EntityCategory.DIAGNOSTIC,
         options=dpu.Access5p8OutputType,
     ),
-    "battery_voltage": port_voltage(
-        "Battery",
-        state_attribute_fields=["max_cell_voltage", "min_cell_voltage"],
-    ),
+    "battery_voltage": port_voltage("Battery"),
     "battery_current": port_current("Battery"),
     "dc_inverter_temperature": port_temperature("DC Inverter"),
     "dc_inverter_error_code": port_error_code("DC Inverter"),
@@ -849,12 +826,6 @@ _SENSORS: Final[dict[str, SensorEntityDescription]] = {
     "temp_evaporator": wave_temperature(),
     "temp_compressor_discharge": wave_temperature(),
     # Delta 2
-    "max_cell_voltage": voltage(
-        precision=3, enabled=False, entity_category=EntityCategory.DIAGNOSTIC
-    ),
-    "min_cell_voltage": voltage(
-        precision=3, enabled=False, entity_category=EntityCategory.DIAGNOSTIC
-    ),
     "dc12v_output_voltage": voltage(precision=2, enabled=False),
     "dc12v_output_current": current(precision=2, enabled=False),
     "dc_input_voltage": voltage(precision=2, enabled=False),
@@ -877,18 +848,12 @@ _SENSORS: Final[dict[str, SensorEntityDescription]] = {
         enabled=False,
     ),
     # Wave 2
-    "outlet_temperature": wave_temperature(),
+    "outlet_temperature": temperature(),
     "power_battery": power(precision=0),
     "power_psdr": power(precision=0),
     "power_mppt": power(precision=0),
     "water_level": enum(options=wave2.WaterLevel),
     # PowerStream
-    "lcd_battery_level": battery(
-        enabled=False, entity_category=EntityCategory.DIAGNOSTIC
-    ),
-    "bms_battery_level": battery(
-        enabled=False, entity_category=EntityCategory.DIAGNOSTIC
-    ),
     "battery_power": power(precision=1),
     "inverter_temperature": temperature(),
     "inverter_current": current(precision=2),
@@ -918,25 +883,6 @@ SENSOR_TYPES: Final[dict[str, SensorEntityDescription]] = (
 _BATTERY_ADDON_SENSORS: Final = {
     "battery_{n}_battery_level": battery(translation_key="battery_level"),
     "battery_{n}_cell_temperature": temperature(translation_key="cell_temperature"),
-    "battery_{n}_voltage": port_voltage(
-        "Battery",
-        state_attribute_fields=[
-            "battery_{n}_max_cell_voltage",
-            "battery_{n}_min_cell_voltage",
-        ],
-    ),
-    "battery_{n}_max_cell_voltage": voltage(
-        precision=3,
-        enabled=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        translation_key="max_cell_voltage",
-    ),
-    "battery_{n}_min_cell_voltage": voltage(
-        precision=3,
-        enabled=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        translation_key="min_cell_voltage",
-    ),
     "battery_{n}_input_power": power(precision=0, translation_key="input_power"),
     "battery_{n}_output_power": power(precision=0, translation_key="output_power"),
 }
@@ -1005,14 +951,7 @@ def _get_extra_battery_entities(
                 EcoflowBatteryAddonSensor(
                     device=device,
                     sensor=attr_name,
-                    description=replace(
-                        desc,
-                        key=attr_name,
-                        state_attribute_fields=[
-                            attr.replace("{n}", str(battery_index))
-                            for attr in desc.state_attribute_fields
-                        ],
-                    ),
+                    description=replace(desc, key=attr_name),
                     battery_index=battery_index,
                 )
             )
@@ -1040,28 +979,6 @@ class EcoflowSensor(EcoflowEntity, SensorEntity):
             if isinstance(self.entity_description, EcoflowSensorEntityDescription)
             else []
         )
-
-        self._register_update_callback(None, sensor)
-        for attribute_field in self._attribute_fields:
-            self._register_update_callback(None, attribute_field)
-        # Refresh the entity name when the name source (e.g. circuit name) updates.
-        self._register_update_callback(None, self._name_field)
-
-    @property
-    def _name_field(self) -> str | None:
-        desc = self.entity_description
-        if isinstance(desc, EcoflowSensorEntityDescription):
-            return desc.name_field
-        return None
-
-    @property
-    def name(self):
-        """Use a device-provided name (e.g. circuit name) when available"""
-        if (name_field := self._name_field) is not None:
-            value = getattr(self._device, name_field, None)
-            if value:
-                return value
-        return super().name
 
     @property
     def native_value(self):
@@ -1094,6 +1011,16 @@ class EcoflowSensor(EcoflowEntity, SensorEntity):
             if hasattr(self._device, field_name)
         }
 
+    async def async_added_to_hass(self):
+        """Run when this Entity has been added to HA."""
+        await super().async_added_to_hass()
+        self._device.register_callback(self.async_write_ha_state, self._sensor)
+
+    async def async_will_remove_from_hass(self):
+        """Entity being removed from hass."""
+        await super().async_will_remove_from_hass()
+        self._device.remove_callback(self.async_write_ha_state, self._sensor)
+
 
 class EcoflowBatteryAddonSensor(EcoflowBatteryAddonEntity, SensorEntity):
     def __init__(
@@ -1111,25 +1038,14 @@ class EcoflowBatteryAddonSensor(EcoflowBatteryAddonEntity, SensorEntity):
         if self.entity_description.translation_key is None:
             self._attr_translation_key = self.entity_description.key
 
-        self._attribute_fields = (
-            description.state_attribute_fields
-            if isinstance(description, EcoflowSensorEntityDescription)
-            else []
-        )
-
-        self._register_update_callback(None, sensor)
-        for attribute_field in self._attribute_fields:
-            self._register_update_callback(None, attribute_field)
-
     @property
     def native_value(self):
         return getattr(self._device, self._sensor, None)
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        prefix = f"battery_{self._battery_index}_"
-        return {
-            field_name.removeprefix(prefix): getattr(self._device, field_name)
-            for field_name in self._attribute_fields
-            if hasattr(self._device, field_name)
-        }
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self._device.register_callback(self.async_write_ha_state, self._sensor)
+
+    async def async_will_remove_from_hass(self):
+        await super().async_will_remove_from_hass()
+        self._device.remove_callback(self.async_write_ha_state, self._sensor)
