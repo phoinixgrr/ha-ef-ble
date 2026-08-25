@@ -11,3 +11,6 @@ custom_components/ef_ble/eflib/.cache/
 __pycache__/
 .DS_Store
 ._*
+
+# ef_inject test run artifacts
+tests/ef_inject/*.out
