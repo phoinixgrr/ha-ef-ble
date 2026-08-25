@@ -128,6 +128,36 @@ _install(
     ),
 )
 
+
+class ExtraStoredData:
+    """Real one is an ABC whose only contract is as_dict(); that is all we need."""
+
+
+class RestoreEntity(Entity):
+    """Mirrors the two readers HA's mixin offers inside async_added_to_hass.
+
+    The real mixin hooks `async_internal_added_to_hass`, so a subclass never calls into it
+    from `async_added_to_hass` and both readers are already primed by the time ours runs.
+    Modelled the same way here: the tests prime `_restored_*` directly, exactly as the
+    restore cache would have.
+    """
+
+    _restored_state = None
+    _restored_extra = None
+
+    async def async_get_last_state(self):
+        return self._restored_state
+
+    async def async_get_last_extra_data(self):
+        return self._restored_extra
+
+
+_install(
+    "homeassistant.helpers.restore_state",
+    ExtraStoredData=ExtraStoredData,
+    RestoreEntity=RestoreEntity,
+)
+
 sys.path.insert(0, REPO)
 import custom_components.ef_inject as efi                      # noqa: E402
 from custom_components.ef_inject import button as efi_button   # noqa: E402
@@ -507,6 +537,105 @@ ck(
     and getattr(metrics["transport"], "_attr_device_class", None) is None,
     "the transport carries no enum device class, so a new source name is not 'invalid'",
 )
+
+# ---- 9. the counters survive a restart without double counting ---------------
+# The regulator's counters are per-session by design, so the lifetime total is the
+# entity's job. Two failure modes are worth more than the feature itself: reporting a
+# total that silently counts the current session twice after a config-entry reload, and
+# breaking the TOTAL_INCREASING backstop that kept statistics continuous BEFORE any of
+# this existed. Both are pinned below.
+
+
+class FakeState:
+    def __init__(self, state):
+        self.state = state
+
+
+class FakeExtra:
+    def __init__(self, d):
+        self._d = d
+
+    def as_dict(self):
+        return self._d
+
+
+def restored(cls, raw_attr, raw, *, extra=None, state=None):
+    """Build a counter entity, prime the restore cache, add it to hass."""
+    setattr(inj, raw_attr, raw)
+    e = cls(inj, RT)
+    e.hass = hass
+    e._restored_extra = None if extra is None else FakeExtra(extra)
+    e._restored_state = None if state is None else FakeState(state)
+    run(e.async_added_to_hass())
+    return e
+
+
+CW = efi_sensor.EfInjectCloudOverwrites
+ck(
+    issubclass(CW, efi_sensor.EfInjectRestoredCounter)
+    and issubclass(efi_sensor.EfInjectWriteErrors, efi_sensor.EfInjectRestoredCounter),
+    "both counters restore; the instantaneous metrics deliberately do not",
+)
+
+# Fresh install: nothing in the cache. Must not invent a total.
+e = restored(CW, "echo_cloud", 4)
+ck(e.native_value == 4, "with an empty restore cache the total is just the session count")
+
+# The case that matters: HA restarted, so the regulator counter is back to 0 while the
+# cache still holds the total it had reached and the session it reached it in.
+e = restored(CW, "echo_cloud", 0, extra={"total": 56, "raw": 32})
+ck(e.native_value == 56, "after a restart the lifetime total resumes at 56, not 0")
+inj.echo_cloud = 3
+ck(e.native_value == 59, "and the new session's events accumulate on top of it")
+
+# Config-entry reload: the entities are rebuilt but the SAME Injector keeps running, so
+# its counter is untouched and the stored total already includes it. Adding the total to
+# a counter it already contains would inflate the series permanently, and nothing would
+# ever correct it.
+e = restored(CW, "echo_cloud", 32, extra={"total": 56, "raw": 32})
+ck(e.native_value == 56, "a reload mid-session re-reports 56, it does NOT double to 88")
+ck(e._offset == 24, "only the 24 earned before this session is carried  <-- the trap")
+inj.echo_cloud = 35
+ck(e.native_value == 59, "and counting continues from there, still not double")
+
+# Upgrade path: the entity has a cached state from the version before this class, so
+# there is no extra data to read. A restart is the only way to get here, so the whole
+# stored state is history.
+e = restored(CW, "echo_cloud", 0, state="56")
+ck(e.native_value == 56, "a state cached by the previous version is adopted as the total")
+
+# Anything unusable in the cache leaves the offset at 0, which is not a data loss: the
+# state drops, and TOTAL_INCREASING makes HA fold the pre-drop value into the long-term
+# sum, exactly as it did before this class existed.
+for bad in ("unknown", "unavailable", "", "-5", "56.4W"):
+    e = restored(CW, "echo_cloud", 7, state=bad)
+    ck(e.native_value == 7, f"a cached state of {bad!r} is ignored rather than trusted")
+e = restored(CW, "echo_cloud", 7, extra={"total": "unknown", "raw": 3})
+ck(e.native_value == 7, "unusable extra data is ignored too")
+e = restored(CW, "echo_cloud", 9, extra={"total": 56})
+ck(e.native_value == 65, "extra data missing `raw` is read as a restart, not as a reload")
+ck(
+    CW._attr_state_class == "total_increasing",
+    "the state class stays TOTAL_INCREASING, so a failed restore still keeps statistics",
+)
+
+# What gets written back has to be the pair, or the next start is guessing again.
+e = restored(CW, "echo_cloud", 5, extra={"total": 56, "raw": 32})
+snap = e.extra_restore_state_data.as_dict()
+ck(
+    snap == {"total": 61, "raw": 5},
+    f"the snapshot stores the total AND the session counter (got {snap})",
+)
+ck(
+    e.extra_state_attributes == {"session": 5, "before_restart": 56},
+    "the session count is on the entity, so a graph and the SUMMARY line can be squared",
+)
+
+# Same behaviour on the other counter, reading its own attribute and no other.
+e = restored(efi_sensor.EfInjectWriteErrors, "write_err", 1, extra={"total": 9, "raw": 4})
+ck(e.native_value == 10, "write failures restore the same way")
+inj.skipped_not_ready = inj.skipped_silent = inj.skipped_stale = 99
+ck(e.native_value == 10, "and still exclude the skips after restoring")
 
 print()
 if fails:

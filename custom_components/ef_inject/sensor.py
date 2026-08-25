@@ -17,7 +17,16 @@ Cadence matters more than count. Every entity here refreshes on the 5s status ti
 on the 2Hz regulation loop; at 2Hz a continuously moving sensor would be ~170k recorder
 rows per day each. If a metric is ever added that needs sub-5s resolution, it does not
 belong in the entity layer.
+
+The two counters are LIFETIME totals, restored across restarts (see
+`EfInjectRestoredCounter`), while the regulator's own counters and every number on the
+SUMMARY log line stay per-session. That split is deliberate, not an inconsistency: the
+log answers "how is this loop doing since it started", a graph answers "how often does
+this happen to my house". Both readings are on the entity, the lifetime one as the state
+and the session one as an attribute, so the two can always be reconciled.
 """
+
+from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -27,6 +36,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import EntityCategory, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 
 from . import DOMAIN, EfInjectRuntime, bias_settle_w
 from .entity import EfInjectEntity
@@ -238,29 +248,134 @@ class EfInjectFreshness(EfInjectEntity, SensorEntity):
         return None if ms is None else round(ms, 1)
 
 
-class EfInjectCloudOverwrites(EfInjectEntity, SensorEntity):
-    """How many times the cloud has clobbered our injected value this session.
+@dataclass
+class _CounterSnapshot(ExtraStoredData):
+    """What has to survive a restart: the total we reported AND the session counter it
+    was derived from.
 
-    TOTAL_INCREASING rather than TOTAL: it resets to 0 on every restart, which is
-    exactly the reset semantics that state class is defined for. The absolute number is
-    close to meaningless; the useful reading is its slope, which is how hard the cloud
-    is currently fighting the injection.
+    Persisting the total alone is not enough. On the next start the entity cannot tell a
+    restart (regulator counter back to 0, so everything it reported is history) from a
+    config-entry reload (regulator still running, counter untouched, so the total it
+    reported ALREADY includes the current session), and guessing wrong in the second
+    direction counts the same events twice, permanently. Keeping the raw counter makes
+    that decision a comparison rather than a guess.
+    """
+
+    total: int
+    raw: int
+
+    def as_dict(self) -> dict:
+        return {"total": self.total, "raw": self.raw}
+
+
+class EfInjectRestoredCounter(EfInjectEntity, RestoreEntity, SensorEntity):
+    """A regulator session counter presented as a lifetime total.
+
+    The regulator's counters live on the `Injector` object and start at 0 whenever a new
+    one is built, which is correct for the log: the SUMMARY line means "since this loop
+    started", and carrying totals across restarts would blend numbers from different code
+    versions. For a graph that is the wrong reading, so the offset is restored here, in
+    the entity, and the regulator is left alone. Nothing in this class is visible to the
+    control loop.
+
+    The state class stays TOTAL_INCREASING even though the value is now monotonic. That
+    is the backstop: if the restore ever comes back empty (a wiped `.storage`, an entity
+    renamed, a restore cache older than the retention) the state drops and HA reads it as
+    a meter reset rather than as a large negative delta, so long-term statistics survive
+    a failure of this class intact. That is the same mechanism that kept the `sum` column
+    continuous before any of this existed.
+
+    Two limits of the restore cache, neither worth engineering around: it is dumped every
+    15 minutes and on a clean stop, so a hard kill can lose up to 15 minutes of counts,
+    and it expires after 7 days, so an entity disabled for longer than that comes back at
+    0. Both are undercounts of a diagnostic, never a wrong regulation decision, and the
+    state class absorbs the second one.
     """
 
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, inj, runtime: EfInjectRuntime, key: str) -> None:
+        super().__init__(inj, runtime, key)
+        self._offset = 0
+
+    @property
+    def _raw(self) -> int:
+        """The regulator's own session counter. Overridden per metric."""
+        raise NotImplementedError
+
+    @property
+    def native_value(self) -> int:
+        return self._offset + self._raw
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Both attributes move only when the state does (or never), so neither costs a
+        recorder row that the state change was not already paying for. `session` is what
+        the log line shows, which is the whole point of exposing it: a discrepancy
+        between the graph and the log is otherwise unexplainable."""
+        return {"session": self._raw, "before_restart": self._offset}
+
+    @property
+    def extra_restore_state_data(self) -> _CounterSnapshot:
+        return _CounterSnapshot(total=self.native_value, raw=self._raw)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+
+        extra = await self.async_get_last_extra_data()
+        if extra is not None:
+            saved = extra.as_dict()
+            total, raw = self._as_count(saved.get("total")), self._as_count(saved.get("raw"))
+        else:
+            # Upgrade path: these entities already have a restore-cache state from before
+            # this class existed, but no extra data. A missing raw is treated as 0, which
+            # is right, because the only way to reach a new module version is a restart.
+            last = await self.async_get_last_state()
+            total, raw = self._as_count(None if last is None else last.state), 0
+
+        if total is None:
+            return          # nothing usable; start from 0 and let the state class cope
+        if raw is None:
+            raw = 0
+        # A counter that did NOT go backwards means the same Injector is still running and
+        # `total` already accounts for its current value, so only the part earned before
+        # that session is carried. A counter that went backwards means a new session, so
+        # the whole total is now history.
+        self._offset = max(0, total - raw) if self._raw >= raw else total
+
+    @staticmethod
+    def _as_count(value) -> int | None:
+        """Non-negative int or None. Guards the restore cache, which can legitimately
+        hold `unknown`, `unavailable` or a value written by an older version."""
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return n if n >= 0 else None
+
+
+class EfInjectCloudOverwrites(EfInjectRestoredCounter):
+    """How many times the cloud has clobbered our injected value, lifetime.
+
+    The absolute number is close to meaningless; the useful reading is its slope, which
+    is how hard the cloud is currently fighting the injection. That is exactly why it is
+    worth restoring: a slope is only comparable week to week if a restart does not chop
+    the series into unrelated fragments.
+    """
+
     _attr_icon = "mdi:cloud-alert"
 
     def __init__(self, inj, runtime: EfInjectRuntime) -> None:
         super().__init__(inj, runtime, "cloud_overwrites")
 
     @property
-    def native_value(self) -> int:
+    def _raw(self) -> int:
         return self._inj.echo_cloud
 
 
-class EfInjectWriteErrors(EfInjectEntity, SensorEntity):
-    """Failed writes to the device this session.
+class EfInjectWriteErrors(EfInjectRestoredCounter):
+    """Failed writes to the device, lifetime.
 
     Counts `write_err` alone, on purpose. Folding in the skip counters
     (`not_ready`, `silent`, `stale`) would bury the signal: those are the regulator
@@ -269,13 +384,11 @@ class EfInjectWriteErrors(EfInjectEntity, SensorEntity):
     line and the status attributes.
     """
 
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:alert-circle-outline"
 
     def __init__(self, inj, runtime: EfInjectRuntime) -> None:
         super().__init__(inj, runtime, "write_errors")
 
     @property
-    def native_value(self) -> int:
+    def _raw(self) -> int:
         return self._inj.write_err
