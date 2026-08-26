@@ -100,6 +100,50 @@ async def main():
     ck(inj.slew_clamps == 1 and abs(inj.slew_worst_w - 1.0) < 1e-9,
        "and the withheld watt is accounted (worst=%.1fW)" % inj.slew_worst_w)
 
+    # ---- 4b. the floor is ONE-SHOT, so the RATE is what governs ---------
+    # The first version of this granted SLEW_UP_MIN_W on every poll, which silently
+    # floors the tracking rate at MIN/POLL_PERIOD_SEC whatever SLEW_UP_W_PER_SEC says:
+    # 240W/s at the shipped 0.25s poll, so every rate below 240 would have behaved
+    # identically to 240. Nothing misbehaved at the shipped 400W/s, because there the
+    # rate term is the binding one anyway, which is exactly why no existing test
+    # caught it. This is the test that does.
+    inj = new_injector()
+    slow = 40.0                      # W/s, far below MIN/POLL_PERIOD_SEC
+    saved_rate = efi.SLEW_UP_W_PER_SEC
+    efi.SLEW_UP_W_PER_SEC = slow
+    try:
+        inj._slew_limit(0.0, t)
+        polls, out = 20, None
+        for i in range(1, polls + 1):
+            out = inj._slew_limit(5000.0, t + 0.25 * i)
+        elapsed = 0.25 * polls
+        budget = efi.SLEW_UP_MIN_W + slow * elapsed
+        ck(out <= budget + 1.0,
+           "%.0fs of sustained demand at %.0fW/s reaches ~%.0fW (one floor plus "
+           "rate*time), not %d floors = %.0fW; got %.0fW"
+           % (elapsed, slow, budget, polls, polls * efi.SLEW_UP_MIN_W, out))
+        ck(out > efi.SLEW_UP_MIN_W,
+           "and it is still climbing, so the one-shot did not become a hard cap "
+           "(%.0fW)" % out)
+        # The floor has to come back, or the second spike of the day would be met
+        # with a bare rate term and the noise immunity above would be a one-off.
+        inj._slew_limit(0.0, t + 6.0)                    # a fall ends the episode
+        again = inj._slew_limit(5000.0, t + 6.25)
+        ck(abs(again - efi.SLEW_UP_MIN_W) < 1e-6,
+           "after a fall the floor is granted again (%.0fW)" % again)
+    finally:
+        efi.SLEW_UP_W_PER_SEC = saved_rate
+
+    # Spent only when actually needed. A wobble that fits inside the rate term must
+    # not consume the floor, or a quiet spell would leave the next real spike
+    # unprotected for having done nothing wrong.
+    inj = new_injector()
+    inj._slew_limit(100.0, t)
+    for i in range(1, 6):
+        inj._slew_limit(100.0 + (10 if i % 2 else -10), t + 0.25 * i)
+    ck(inj._slew_floor_ready,
+       "wobbles inside the rate term leave the one-shot floor unspent")
+
     # ---- 5. the measured failure: a brief spike is attenuated ----------
     # The 08:53:27 event, reconstructed: steady ~90W, a 500W spike for one poll
     # period, then back. Without the limiter the injected value carries the whole
@@ -184,10 +228,14 @@ async def main():
     rm(efi.STOP_FILE)
     efi.write_text_atomic(efi.BIAS_FILE, "0")   # isolate the clamp from the bias
     # Faster than shipped so a step and its recovery both fit in a test window. The
-    # rate term is then tiny (400W/s * 0.02s = 8W), so what is exercised here is the
-    # SLEW_UP_MIN_W floor, which is the term that actually bites on a real spike.
+    # rate is scaled up to match: now that the floor is a one-shot it cannot carry a
+    # sustained rise, so at the shipped 400W/s a 1500W step would need 3.6s to track
+    # and this section would be testing the test's own timeout. 4000W/s over a 0.02s
+    # poll gives 80W per cycle, which clamps the step hard on arrival and still
+    # catches up inside the window.
     efi.POLL_PERIOD_SEC = 0.02
     efi.KEEPALIVE_SEC = 0.04
+    efi.SLEW_UP_W_PER_SEC = 4000.0
 
     def bind(inj):
         """The Injector points at the real Shellys; aim both meters at the fake."""
@@ -206,6 +254,7 @@ async def main():
     await asyncio.sleep(0.4)                    # now let it catch up
     caught = [w for _t, w in dev.sends[sent_before:]]
     srv.value = 100.0
+    n_drop = len(dev.sends)
     await asyncio.sleep(0.3)
     inj.running = False
     try:
@@ -225,10 +274,13 @@ async def main():
     ck(inj.slew_worst_w > 0 and inj.slew_held_w >= inj.slew_worst_w,
        "worst and cumulative held watts are both recorded (worst=%.0f held=%.0f)"
        % (inj.slew_worst_w, inj.slew_held_w))
-    tail = [w for _t, w in dev.sends[-3:]]
+    # Every send after the drop, not the last N: MIN_SEND_GAP_SEC throttles writes to
+    # ~6/s, so a fixed tail window silently includes the pre-drop keepalive and the
+    # assertion becomes a function of the sleep length rather than of the behaviour.
+    tail = [w for _t, w in dev.sends[n_drop:]]
     ck(tail and max(tail) <= 110.0,
        "and the loop came back down to the low reading, so nothing latched high "
-       "(last sends %r)" % tail)
+       "(%d sends after the drop, max %s)" % (len(tail), max(tail) if tail else None))
 
     # The CLOUD arm must not move the counters: it injects nothing, so counting
     # its cycles would make an A/B comparison of the limiter meaningless.

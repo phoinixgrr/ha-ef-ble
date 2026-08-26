@@ -24,9 +24,18 @@ SAFETY DESIGN
     lands on the grid as export, while a fall's undershoot lands as import; only one
     of those is a compliance event. It can never command MORE output than the raw
     reading would, so a bug in it fails toward import. See SLEW_UP_W_PER_SEC.
+  - the cloud writes this same field itself, and the Ultras stop feeding the house
+    the moment their cloud link drops, so that path is not optional and cannot be
+    blocked. Its frames arrive unbiased and unslewed, and measurement put 85% of the
+    remaining reverse-flow magnitude within one tick of one. So an overwrite is
+    answered with a counter-kick: a value deliberately BELOW the biased one for a
+    couple of cycles, cancelling the ramp the cloud just commanded instead of waiting
+    it out. Kicks only ever lower the injected value, so this too fails toward
+    import. See CLOUD_KICK.
   - kill switch: touch /config/ef_inject_stop  (or remove the integration)
     slew off:    touch /config/ef_inject_noslew  (presence DISABLES, so forgetting
                  the file leaves the protection ON)
+    kick off:    touch /config/ef_inject_nokick  (presence DISABLES, same reasoning)
 
 OBSERVABILITY
   Exposes sensor.ef_inject_status with counters so the effect can be measured
@@ -254,8 +263,17 @@ WRITE_ON_CHANGE_W = 0.5             # treat as a new reading if it moved this mu
 # limiter and a spike is attenuated in proportion to how brief it is. A genuine
 # sustained step is still tracked, just over ~1s per 400W, and the deficit while
 # it catches up is served by the grid, which is the compliant direction.
+#
+# The floor is a ONE-SHOT allowance, granted once per rise episode and not again
+# until the reading stops rising. Granting it per poll instead (which is what the
+# first version of this did) silently floors the tracking rate at
+# SLEW_UP_MIN_W / POLL_PERIOD_SEC, i.e. 240W/s at a 0.25s poll, so every value of
+# SLEW_UP_W_PER_SEC below 240 would have behaved identically to 240 and the
+# constant would have been a decoration. At the shipped 400W/s the rate term is
+# the binding one either way, so this changed no behaviour when it was fixed; it
+# is what makes the rate tunable DOWNWARD at all.
 SLEW_UP_W_PER_SEC = 400.0
-SLEW_UP_MIN_W = 60.0                # any rise this small passes untouched
+SLEW_UP_MIN_W = 60.0                # any rise this small passes untouched, once
 # A reference older than this is not a reference. After a read gap the load may
 # legitimately be anywhere, and clamping against a stale anchor would hold the
 # injected value down for no reason. Matches STALE_AFTER_SEC on purpose.
@@ -265,6 +283,48 @@ SLEW_RESET_SEC = 3.0
 # forgetting to create a file must be "protected", not "unprotected". It exists so
 # the limiter can be A/B'd against its own absence without a restart.
 NOSLEW_FILE = "/config/ef_inject_noslew"
+
+# ---------------------------------------------------------------------------
+# Cloud overwrite counter-kick.
+#
+# The Ultras stop feeding the house the moment their cloud link drops, so the
+# cloud is not a telemetry channel: it is inside their control loop, and it writes
+# phase C itself. Measured 2026-08-26: 2% of telemetry frames carry a value we did
+# not send, ~51 an hour, exposed for ~146ms each before we re-assert. Correlating
+# every reverse-flow sample that day against those events put 9 of 16 within one
+# status tick, carrying 85% of the total reverse magnitude, against a 14% base
+# rate. That is where the residual export is.
+#
+# The mechanism is specific. At equilibrium our injected value sits `cushion` watts
+# BELOW truth, which is exactly what buys the import cushion. A cloud frame carries
+# the cloud's own reading, unbiased and never slew limited, so the Ultra suddenly
+# sees a house drawing more than it was regulating to and ramps output UP. Note the
+# bias cannot help here at any setting: the applied bias EQUALS the cushion at
+# equilibrium, so the jump and the headroom absorbing it scale together and cancel.
+# What is left over, and what actually reaches the grid, is the cloud reading's own
+# staleness plus the Ultra's ramp overshoot, and neither term depends on the bias.
+#
+# So this does not try to reduce the jump. It cancels it: on detecting an overwrite,
+# re-assert a value BELOW the normal biased one for a couple of cycles, actively
+# pulling output back down instead of waiting for the Ultra to settle.
+#
+# The magnitude is measured, not guessed. At detection we know the value the cloud
+# wrote and our own local reading, and their difference IS how much extra output the
+# cloud just commanded. Only a POSITIVE difference is kicked: a cloud value below
+# ours commands less output, which lands as import, and needs no help.
+#
+# Direction of failure: a kick only ever lowers the injected value, so it only ever
+# commands LESS output. Every failure mode here is import.
+CLOUD_KICK = True
+CLOUD_KICK_GAIN = 1.0               # fraction of the measured delta to cancel
+CLOUD_KICK_MAX_W = 300.0            # hard ceiling on a single kick, watts
+# Two writes at the 0.5s keepalive is ~0.5s of pull-down against a ~146ms exposure,
+# so the correction outlasts the disturbance rather than racing it. Worst-case cost
+# if every kick were full size: 300W for 0.5s per event, ~1200 events/day, ~50Wh.
+CLOUD_KICK_CYCLES = 2
+# Presence DISABLES, same reasoning as NOSLEW_FILE: forgetting the file must leave
+# the protection on. Exists so the kick can be A/B'd without a restart.
+NOKICK_FILE = "/config/ef_inject_nokick"
 
 # ---------------------------------------------------------------------------
 # Import cushion. The regulator drives what it SEES to zero, and it sees
@@ -490,6 +550,7 @@ FLAG_FILES = {
     "ab": AB_FILE,
     "causation": CAUSATION_FILE,
     "noslew": NOSLEW_FILE,
+    "nokick": NOKICK_FILE,
 }
 
 
@@ -675,6 +736,15 @@ class Injector:
         self._cloud_seen_ts = None  # set when a cloud overwrite is detected
         self.reasserts = 0          # writes triggered by a detected cloud overwrite
         self.reassert_ms_sum = 0.0
+        # cloud overwrite counter-kick. `_kick_w` is the measured delta the cloud
+        # commanded, `_kick_left` how many more writes should carry the correction.
+        self._kick_w = 0.0
+        self._kick_left = 0
+        self.kicks = 0              # writes that carried a counter-kick
+        self.kick_events = 0        # overwrites that armed one
+        self.kick_w_sum = 0.0       # sum of kick watts applied, for a mean
+        self.kick_worst_w = 0.0     # largest single kick applied, watts
+        self.kick_skipped = 0       # overwrites that needed no kick (delta <= 0)
         # self-healing device attachment
         self._device_ref = None         # DeviceBase we are currently attached to
         self._cancel_listener = None    # detach callback for that attachment
@@ -720,6 +790,10 @@ class Injector:
         # rise slew limiter
         self._slew_ref_w = None         # last effective value, the anchor for the rise
         self._slew_ref_ts = 0.0
+        # The one-shot floor. True means SLEW_UP_MIN_W has not yet been spent on the
+        # rise currently in progress. Consumed by a rise that needed more than the rate
+        # term alone, restored as soon as the reading stops rising. See SLEW_UP_MIN_W.
+        self._slew_floor_ready = True
         self.slew_clamps = 0            # cycles where a rise was held back
         self.slew_worst_w = 0.0         # largest single rise suppressed, watts
         self.slew_held_w = 0.0          # sum of watts withheld, for a mean
@@ -910,17 +984,27 @@ class Injector:
         else:
             self.echo_cloud += 1
             local = self.last_local[1] if self.last_local else float("nan")
-            if self._verbose():
-                log(
-                    "EFINJECT echo CLOUD c=%dW (local now %.0fW, delta %.0fW) "
-                    "grid=%.0f batt=%.0f",
-                    c, local, c - local, msg.pow_get_sys_grid, msg.pow_get_bp_cms,
-                )
             # The cloud just clobbered our value. Wake the loop now rather than
             # letting the stale value ride until the next tick.
             if REASSERT_ON_CLOUD and not self.paused:
                 self._cloud_seen_ts = now
                 self._wake.set()
+            kick = 0.0
+            if CLOUD_KICK and not self.flags.get("nokick") and not self.paused:
+                kick = self._arm_kick(c, local)
+            else:
+                self.kick_skipped += 1
+            # NOT gated on _verbose(). This is the only per-event record of the one
+            # mechanism that still puts energy on the grid, and inferring it from the
+            # 5s counter tick cost a ±5s timing resolution that made a real
+            # correlation unprovable. ~51 lines an hour measured, against 120 for the
+            # summary line, so the log stays readable.
+            log(
+                "EFINJECT echo CLOUD c=%dW (local now %.0fW, delta %+.0fW) "
+                "kick=%.0fW grid=%.0f batt=%.0f",
+                c, local, c - local, kick,
+                msg.pow_get_sys_grid, msg.pow_get_bp_cms,
+            )
 
     # -- local meter --------------------------------------------------------
     def _modbus_wanted(self):
@@ -1219,6 +1303,7 @@ class Injector:
             # Still track the anchor, so toggling the flag back on does not clamp
             # against a reference from minutes ago.
             self._slew_ref_w, self._slew_ref_ts = w, now
+            self._slew_floor_ready = True
             return w
 
         dt = now - self._slew_ref_ts
@@ -1228,9 +1313,29 @@ class Injector:
         # because in both of those cases the anchor is not evidence about now.
         if self._slew_ref_w is None or dt < 0 or dt > SLEW_RESET_SEC:
             self._slew_ref_w, self._slew_ref_ts = w, now
+            self._slew_floor_ready = True
             return w
 
-        ceiling = self._slew_ref_w + max(SLEW_UP_MIN_W, SLEW_UP_W_PER_SEC * dt)
+        # A reading that is not above the anchor ends the rise episode, which is what
+        # makes the floor a one-shot rather than a per-poll grant. Checked BEFORE the
+        # ceiling so a fall can never be counted as a clamp.
+        if w <= self._slew_ref_w:
+            self._slew_ref_w, self._slew_ref_ts = w, now
+            self._slew_floor_ready = True
+            return w
+
+        by_rate = SLEW_UP_W_PER_SEC * dt
+        # max(), not sum: the floor is an alternative to the rate term, not a bonus on
+        # top of it, so a long dt is governed by the rate alone and a short one by the
+        # floor. Summing them would make every clamp SLEW_UP_MIN_W too generous.
+        allowance = max(SLEW_UP_MIN_W, by_rate) if self._slew_floor_ready else by_rate
+        # Spend the floor only when the rise actually needed it. A rise that fits
+        # inside the rate term costs nothing, which is why steady noise never
+        # exhausts the allowance and never earns a clamp on the cycle after.
+        if self._slew_floor_ready and (w - self._slew_ref_w) > by_rate:
+            self._slew_floor_ready = False
+
+        ceiling = self._slew_ref_w + allowance
         if w > ceiling:
             held = w - ceiling
             self.slew_clamps += 1
@@ -1240,6 +1345,26 @@ class Injector:
 
         self._slew_ref_w, self._slew_ref_ts = w, now
         return w
+
+    def _arm_kick(self, cloud_w, local_w):
+        """Arm a counter-kick for an overwrite the cloud just made. See CLOUD_KICK.
+
+        `cloud_w - local_w` is how much extra output the cloud's value just commanded,
+        so it is the amount to cancel. Only a positive delta is armed: a cloud value
+        below ours commands less output, which lands as import.
+        """
+        delta = cloud_w - local_w
+        if not (delta > 0.0) or delta != delta:      # also rejects NaN local
+            self.kick_skipped += 1
+            return 0.0
+        want = min(delta * CLOUD_KICK_GAIN, CLOUD_KICK_MAX_W)
+        # A second overwrite while a kick is still running replaces it rather than
+        # adding to it. Adding would let a burst of frames stack into an unbounded
+        # pull-down, which is import we never chose.
+        self._kick_w = want
+        self._kick_left = CLOUD_KICK_CYCLES
+        self.kick_events += 1
+        return want
 
     async def _read_http(self):
         """The original RPC path. Returns watts or None."""
@@ -1534,14 +1659,23 @@ class Injector:
             log(
                 "EFINJECT START poll=%.2fs keepalive=%.2fs meter=%s model=%s bias=%+dW%s "
                 "fade_to_zero_at=%+.0fW (expect real grid to settle near %+.0fW "
-                "import; full bias only applies at or below 0W) rise_slew=%s",
+                "import; full bias only applies at or below 0W) rise_slew=%s "
+                "cloud_kick=%s",
                 POLL_PERIOD_SEC, KEEPALIVE_SEC, sn, model, bias_now,
                 "" if bias_now == BIAS_W else " (override, default %+dW)" % BIAS_W,
                 BIAS_FADE_W, bias_settle_w(bias_now),
                 (
                     "DISABLED (%s present)" % NOSLEW_FILE
                     if self.flags.get("noslew")
-                    else "%.0fW/s, min %.0fW" % (SLEW_UP_W_PER_SEC, SLEW_UP_MIN_W)
+                    else "%.0fW/s, min %.0fW once per rise"
+                         % (SLEW_UP_W_PER_SEC, SLEW_UP_MIN_W)
+                ),
+                (
+                    "DISABLED (%s present)" % NOKICK_FILE
+                    if self.flags.get("nokick")
+                    else "off (CLOUD_KICK=False)" if not CLOUD_KICK
+                    else "gain %.2f, max %.0fW, %d cycles"
+                         % (CLOUD_KICK_GAIN, CLOUD_KICK_MAX_W, CLOUD_KICK_CYCLES)
                 ),
             )
             self.running = True
@@ -1682,7 +1816,11 @@ class Injector:
                     or abs(w - self._last_src_w) >= WRITE_ON_CHANGE_W
                 )
                 due = (now - self._last_send_ts) >= KEEPALIVE_SEC
-                pending_cloud = self._cloud_seen_ts is not None
+                # A kick still owed is as good a reason to write as a new reading. Only
+                # the FIRST kick cycle rides `pending_cloud`, which is cleared on that
+                # write, so without this the rest of the pull-down would wait on the
+                # keepalive and arrive up to KEEPALIVE_SEC after the ramp it corrects.
+                pending_cloud = self._cloud_seen_ts is not None or self._kick_left > 0
                 if not (changed or due or pending_cloud):
                     self.polls_no_write += 1
                     await self._pace()
@@ -1712,7 +1850,15 @@ class Injector:
                         self.bias_idle += 1
                 self.bias_applied = bias
 
-                val = int(round(w + bias))
+                # Counter-kick for a cloud overwrite, on top of the cushion and after
+                # the fade, because the fade is about proximity to export and this is
+                # about undoing a ramp that has already been commanded. Subtracted, so
+                # it can only ever reduce the output we ask for. See CLOUD_KICK.
+                kick = 0
+                if self._kick_left > 0:
+                    kick = int(round(min(self._kick_w, CLOUD_KICK_MAX_W)))
+
+                val = int(round(w + bias - kick))
                 if abs(val) > MAX_ABS_W:
                     self.skipped_read_err += 1
                     await self._pace()
@@ -1759,14 +1905,25 @@ class Injector:
                         self.reasserts += 1
                         self.reassert_ms_sum += (self._last_send_ts - cst) * 1000
                         self._cloud_seen_ts = None
+                    # Spend one cycle of the counter-kick. Decremented HERE, on a
+                    # confirmed write, not where the kick is computed: a cycle that
+                    # never reached the device corrected nothing, and counting it
+                    # would let the correction expire while the ramp was still up.
+                    if kick:
+                        self._kick_left -= 1
+                        self.kicks += 1
+                        self.kick_w_sum += kick
+                        self.kick_worst_w = max(self.kick_worst_w, float(kick))
+                        if self._kick_left <= 0:
+                            self._kick_w = 0.0
                     if len(self._recent_sent) > 40:
                         del self._recent_sent[:-40]
                     if self._verbose():
                         dbg(
-                            "EFINJECT send #%d true=%.0fW slewed=%.0fW bias=%+d c=%dW "
-                            "batt=%s read=%.0fms ble=%.0fms",
-                            self.sent, w_true, w, bias, self.last_sent_w, self.batt_w,
-                            read_ms, send_ms,
+                            "EFINJECT send #%d true=%.0fW slewed=%.0fW bias=%+d "
+                            "kick=-%d c=%dW batt=%s read=%.0fms ble=%.0fms",
+                            self.sent, w_true, w, bias, kick, self.last_sent_w,
+                            self.batt_w, read_ms, send_ms,
                         )
                     # Compact liveness at WARNING so the log stays readable but the
                     # loop is never silent. See HEARTBEAT_SEC.
@@ -1842,6 +1999,8 @@ class Injector:
                         "| polls=%d w_chg=%d w_keep=%d nowrite=%d rate=%.2f/s "
                         "stale_avg=%.0fms "
                         "| SLEW %s clamps=%d worst=%.0fW mean_held=%.0fW "
+                        "| KICK %s events=%d sends=%d skipped=%d worst=%.0fW "
+                        "mean=%.0fW "
                         "| SEC(%s) ok=%d err=%d used=%d d_now=%+.1fW/%d d_last=%+.1fW "
                         "d_absmax=%.0fW "
                         "| GUARD interleave=%s verdicts=%d busy=%d bad=%d good=%d/%d "
@@ -1873,6 +2032,13 @@ class Injector:
                             self.slew_held_w / self.slew_clamps
                             if self.slew_clamps else 0.0
                         ),
+                        (
+                            "OFF(nokick file)" if self.flags.get("nokick")
+                            else "OFF(const)" if not CLOUD_KICK else "ON"
+                        ),
+                        self.kick_events, self.kicks, self.kick_skipped,
+                        self.kick_worst_w,
+                        (self.kick_w_sum / self.kicks if self.kicks else 0.0),
                         self._second_mode, self._mb2.reads, self._mb2.err,
                         self.sec_used,
                         (
@@ -1984,6 +2150,14 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "slew_mean_held_w": (
                     round(inj.slew_held_w / inj.slew_clamps, 1)
                     if inj.slew_clamps else 0.0
+                ),
+                "kick_enabled": CLOUD_KICK and not inj.flags.get("nokick"),
+                "kick_events": inj.kick_events,
+                "kick_sends": inj.kicks,
+                "kick_skipped": inj.kick_skipped,
+                "kick_worst_w": round(inj.kick_worst_w, 1),
+                "kick_mean_w": (
+                    round(inj.kick_w_sum / inj.kicks, 1) if inj.kicks else 0.0
                 ),
                 "send_rate_hz": (
                     round(inj.sent / (time.time() - inj._t_start), 2)
