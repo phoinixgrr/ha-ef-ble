@@ -31,7 +31,8 @@ SAFETY DESIGN
     answered with a counter-kick: a value deliberately BELOW the biased one for a
     couple of cycles, cancelling the ramp the cloud just commanded instead of waiting
     it out. Kicks only ever lower the injected value, so this too fails toward
-    import. See CLOUD_KICK.
+    import, but the RELEASE of one is a rise and has to be rate limited like any
+    other; dropping it in a single write made export measurably worse. See CLOUD_KICK.
   - kill switch: touch /config/ef_inject_stop  (or remove the integration)
     slew off:    touch /config/ef_inject_noslew  (presence DISABLES, so forgetting
                  the file leaves the protection ON)
@@ -315,12 +316,32 @@ NOSLEW_FILE = "/config/ef_inject_noslew"
 #
 # Direction of failure: a kick only ever lowers the injected value, so it only ever
 # commands LESS output. Every failure mode here is import.
+#
+# THE RELEASE EDGE, and the bug that made the first version of this worse than
+# nothing. `_slew_limit` governs the meter READING; the kick is subtracted after it,
+# so the limiter never sees it and `_slew_ref_w` never moves when it changes. The
+# first version therefore dropped the whole correction in ONE write when the hold
+# expired, which is a step UP of up to CLOUD_KICK_MAX_W on the wire even with a
+# dead-flat meter. That is a command to ramp output up hard, and its overshoot is
+# export: exactly the failure the slew limiter exists to prevent, reintroduced once
+# per kick. Measured on 2026-08-26, phase C export ran 0.29Wh/h in the 4.6h before
+# the kick went live and 1.21Wh/h in the 69min after, the worst hour-14 in three days.
+# The pull-down was never the problem; every intermediate value is below the biased
+# one and lands as import. Only the recovery was.
+#
+# So the correction is now BLED OFF at SLEW_UP_W_PER_SEC rather than dropped. That
+# rate is reused deliberately instead of getting its own constant: it makes the
+# invariant true by construction, because the release can then never command a rise
+# the limiter would have refused from a real load. A 300W kick takes 0.75s to clear
+# at 400W/s, during all of which the value is still under truth.
 CLOUD_KICK = True
 CLOUD_KICK_GAIN = 1.0               # fraction of the measured delta to cancel
 CLOUD_KICK_MAX_W = 300.0            # hard ceiling on a single kick, watts
-# Two writes at the 0.5s keepalive is ~0.5s of pull-down against a ~146ms exposure,
-# so the correction outlasts the disturbance rather than racing it. Worst-case cost
-# if every kick were full size: 300W for 0.5s per event, ~1200 events/day, ~50Wh.
+# Writes to HOLD the correction at full size before the release ramp starts. Two at
+# the 0.5s keepalive is ~0.5s of pull-down against a ~146ms exposure, so the
+# correction outlasts the disturbance rather than racing it. Worst-case cost if every
+# kick were full size: 300W held 0.5s plus 0.75s of ramp, ~1200 events/day, ~90Wh of
+# import. That is the price of the mechanism, and it is import, not export.
 CLOUD_KICK_CYCLES = 2
 # Presence DISABLES, same reasoning as NOSLEW_FILE: forgetting the file must leave
 # the protection on. Exists so the kick can be A/B'd without a restart.
@@ -737,9 +758,12 @@ class Injector:
         self.reasserts = 0          # writes triggered by a detected cloud overwrite
         self.reassert_ms_sum = 0.0
         # cloud overwrite counter-kick. `_kick_w` is the measured delta the cloud
-        # commanded, `_kick_left` how many more writes should carry the correction.
+        # commanded, `_kick_left` how many more writes should carry it at FULL size
+        # before the release ramp starts, and `_kick_ts` when `_kick_w` last moved,
+        # which is what makes the release a rate rather than a step.
         self._kick_w = 0.0
         self._kick_left = 0
+        self._kick_ts = 0.0
         self.kicks = 0              # writes that carried a counter-kick
         self.kick_events = 0        # overwrites that armed one
         self.kick_w_sum = 0.0       # sum of kick watts applied, for a mean
@@ -991,7 +1015,7 @@ class Injector:
                 self._wake.set()
             kick = 0.0
             if CLOUD_KICK and not self.flags.get("nokick") and not self.paused:
-                kick = self._arm_kick(c, local)
+                kick = self._arm_kick(c, local, now)
             else:
                 self.kick_skipped += 1
             # NOT gated on _verbose(). This is the only per-event record of the one
@@ -1346,7 +1370,7 @@ class Injector:
         self._slew_ref_w, self._slew_ref_ts = w, now
         return w
 
-    def _arm_kick(self, cloud_w, local_w):
+    def _arm_kick(self, cloud_w, local_w, now=None):
         """Arm a counter-kick for an overwrite the cloud just made. See CLOUD_KICK.
 
         `cloud_w - local_w` is how much extra output the cloud's value just commanded,
@@ -1360,11 +1384,39 @@ class Injector:
         want = min(delta * CLOUD_KICK_GAIN, CLOUD_KICK_MAX_W)
         # A second overwrite while a kick is still running replaces it rather than
         # adding to it. Adding would let a burst of frames stack into an unbounded
-        # pull-down, which is import we never chose.
-        self._kick_w = want
+        # pull-down, which is import we never chose. Note this can RAISE the standing
+        # correction in one step, which is the safe direction, and can also lower it
+        # mid-release; a lower replacement is a rise on the wire, so it is left to the
+        # release ramp rather than applied here. See _kick_now.
+        if want >= self._kick_w:
+            self._kick_w = want
         self._kick_left = CLOUD_KICK_CYCLES
+        self._kick_ts = time.time() if now is None else now
         self.kick_events += 1
         return want
+
+    def _kick_now(self, now):
+        """The correction to subtract on this cycle, bleeding off the release ramp.
+
+        Called once per cycle that gets as far as computing a value, and stateful, so
+        it must not be called twice. The hold phase (`_kick_left`) keeps it at full
+        size; after that it decays at SLEW_UP_W_PER_SEC.
+
+        The rate is shared with the slew limiter on purpose. The limiter governs the
+        meter READING and the kick is applied after it, so nothing here is visible to
+        `_slew_ref_w`; reusing the rate is what keeps the guarantee anyway, that the
+        release cannot command a rise the limiter would have refused. Dropping the
+        correction in one write instead measurably made export WORSE. See CLOUD_KICK.
+        """
+        if self._kick_w <= 0.0:
+            return 0
+        dt = now - self._kick_ts
+        # Hold at full size while cycles are owed. A clock that went backwards is
+        # treated as no elapsed time, which stalls the release rather than jumping it.
+        if self._kick_left <= 0 and dt > 0.0:
+            self._kick_w = max(0.0, self._kick_w - SLEW_UP_W_PER_SEC * dt)
+        self._kick_ts = now
+        return int(round(min(self._kick_w, CLOUD_KICK_MAX_W)))
 
     async def _read_http(self):
         """The original RPC path. Returns watts or None."""
@@ -1674,8 +1726,9 @@ class Injector:
                     "DISABLED (%s present)" % NOKICK_FILE
                     if self.flags.get("nokick")
                     else "off (CLOUD_KICK=False)" if not CLOUD_KICK
-                    else "gain %.2f, max %.0fW, %d cycles"
-                         % (CLOUD_KICK_GAIN, CLOUD_KICK_MAX_W, CLOUD_KICK_CYCLES)
+                    else "gain %.2f, max %.0fW, hold %d writes, release %.0fW/s"
+                         % (CLOUD_KICK_GAIN, CLOUD_KICK_MAX_W, CLOUD_KICK_CYCLES,
+                            SLEW_UP_W_PER_SEC)
                 ),
             )
             self.running = True
@@ -1817,10 +1870,17 @@ class Injector:
                 )
                 due = (now - self._last_send_ts) >= KEEPALIVE_SEC
                 # A kick still owed is as good a reason to write as a new reading. Only
-                # the FIRST kick cycle rides `pending_cloud`, which is cleared on that
+                # the FIRST kick cycle rides `_cloud_seen_ts`, which is cleared on that
                 # write, so without this the rest of the pull-down would wait on the
                 # keepalive and arrive up to KEEPALIVE_SEC after the ramp it corrects.
-                pending_cloud = self._cloud_seen_ts is not None or self._kick_left > 0
+                # `_kick_w > 0` rather than `_kick_left > 0`, so the RELEASE keeps
+                # writing too: on the keepalive alone the ramp would be sampled every
+                # 0.5s and land as ~200W steps at SLEW_UP_W_PER_SEC, which is the kind
+                # of step this whole change exists to remove. Writing every poll makes
+                # them SLEW_UP_W_PER_SEC * POLL_PERIOD_SEC = ~100W instead, which is
+                # exactly what the limiter already permits a real load rise, so a
+                # released kick is indistinguishable from ordinary tracking.
+                pending_cloud = self._cloud_seen_ts is not None or self._kick_w > 0.0
                 if not (changed or due or pending_cloud):
                     self.polls_no_write += 1
                     await self._pace()
@@ -1853,10 +1913,9 @@ class Injector:
                 # Counter-kick for a cloud overwrite, on top of the cushion and after
                 # the fade, because the fade is about proximity to export and this is
                 # about undoing a ramp that has already been commanded. Subtracted, so
-                # it can only ever reduce the output we ask for. See CLOUD_KICK.
-                kick = 0
-                if self._kick_left > 0:
-                    kick = int(round(min(self._kick_w, CLOUD_KICK_MAX_W)))
+                # it can only ever reduce the output we ask for. Exactly one call per
+                # cycle: this advances the release ramp. See CLOUD_KICK.
+                kick = self._kick_now(now)
 
                 val = int(round(w + bias - kick))
                 if abs(val) > MAX_ABS_W:
@@ -1905,17 +1964,21 @@ class Injector:
                         self.reasserts += 1
                         self.reassert_ms_sum += (self._last_send_ts - cst) * 1000
                         self._cloud_seen_ts = None
-                    # Spend one cycle of the counter-kick. Decremented HERE, on a
+                    # Spend one cycle of the HOLD phase. Decremented HERE, on a
                     # confirmed write, not where the kick is computed: a cycle that
                     # never reached the device corrected nothing, and counting it
                     # would let the correction expire while the ramp was still up.
+                    #
+                    # `_kick_w` is deliberately NOT cleared when the count runs out.
+                    # That is what the first version did, and zeroing it is a step up
+                    # of the whole correction in one write, which is export. It is
+                    # bled off by _kick_now instead.
                     if kick:
-                        self._kick_left -= 1
+                        if self._kick_left > 0:
+                            self._kick_left -= 1
                         self.kicks += 1
                         self.kick_w_sum += kick
                         self.kick_worst_w = max(self.kick_worst_w, float(kick))
-                        if self._kick_left <= 0:
-                            self._kick_w = 0.0
                     if len(self._recent_sent) > 40:
                         del self._recent_sent[:-40]
                     if self._verbose():
