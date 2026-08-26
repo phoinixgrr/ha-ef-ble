@@ -19,7 +19,14 @@ SAFETY DESIGN
   - writes are serialised through our own lock, because eflib has no send lock and
     other writers (the 15-min reconcile, UI controls) share this BLE connection.
   - a plausibility clamp rejects absurd readings before they are sent.
+  - a rise slew limit refuses to chase a load spike shorter than our own response
+    time. Only RISES are rationed, because a rise commands ramp-UP and its overshoot
+    lands on the grid as export, while a fall's undershoot lands as import; only one
+    of those is a compliance event. It can never command MORE output than the raw
+    reading would, so a bug in it fails toward import. See SLEW_UP_W_PER_SEC.
   - kill switch: touch /config/ef_inject_stop  (or remove the integration)
+    slew off:    touch /config/ef_inject_noslew  (presence DISABLES, so forgetting
+                 the file leaves the protection ON)
 
 OBSERVABILITY
   Exposes sensor.ef_inject_status with counters so the effect can be measured
@@ -214,6 +221,50 @@ INTERLEAVE_QUIET_SEC = 1.5          # ... across at least this long (> 1Hz perio
 POLL_PERIOD_SEC = 0.25
 KEEPALIVE_SEC = 0.5                 # re-assert at least this often regardless
 WRITE_ON_CHANGE_W = 0.5             # treat as a new reading if it moved this much
+
+# ---------------------------------------------------------------------------
+# Rise slew limit: do not chase a load spike that is shorter than our own
+# response time.
+#
+# Evidence, 2026-08-26. Two export events (-105W at 08:50:50 and -405W at
+# 08:53:27) occurred with the meter reading steady at +38..+198W either side,
+# with NO load switching off, and with injection age at 140-150ms, i.e. the
+# transport was healthy and the loop was not late. The heat pump was cycling
+# through the same minutes. So the excursions were not a missed load DROP, which
+# is what a bigger cushion or a feed-forward addresses. They were the inverter
+# faithfully chasing a sub-second load SPIKE: the reading jumps, we inject it, the
+# inverter ramps up, and by the time that output arrives the spike is over and the
+# surplus goes to the grid. The loop manufactured the export by being obedient.
+#
+# The fix is an asymmetry that costs nothing, because the two directions are not
+# symmetric in consequence:
+#   rising  reading -> commands ramp-UP   -> overshoot lands on the GRID (export)
+#   falling reading -> commands ramp-DOWN -> undershoot lands on the GRID (import)
+# Only one of those is a compliance event, so only the rising direction is
+# limited. A fall passes through untouched at full speed.
+#
+# Deliberately a RATE limit, not a min-over-window filter. A min filter also
+# suppresses spikes, but it sits below the true reading during ordinary meter
+# noise, which is a permanent hidden cushion: it would quietly raise import all
+# day and be indistinguishable from someone having moved the bias. A rate limit
+# has no steady-state effect at all, because a settled reading has zero slew.
+#
+# SLEW_UP_MIN_W is what guarantees that: any rise up to that size passes
+# instantly regardless of elapsed time, so ordinary noise never touches the
+# limiter and a spike is attenuated in proportion to how brief it is. A genuine
+# sustained step is still tracked, just over ~1s per 400W, and the deficit while
+# it catches up is served by the grid, which is the compliant direction.
+SLEW_UP_W_PER_SEC = 400.0
+SLEW_UP_MIN_W = 60.0                # any rise this small passes untouched
+# A reference older than this is not a reference. After a read gap the load may
+# legitimately be anywhere, and clamping against a stale anchor would hold the
+# injected value down for no reason. Matches STALE_AFTER_SEC on purpose.
+SLEW_RESET_SEC = 3.0
+# Presence DISABLES the limiter, unlike every other flag file here, because this
+# one is a safety default rather than an experiment: the failure mode of
+# forgetting to create a file must be "protected", not "unprotected". It exists so
+# the limiter can be A/B'd against its own absence without a restart.
+NOSLEW_FILE = "/config/ef_inject_noslew"
 
 # ---------------------------------------------------------------------------
 # Import cushion. The regulator drives what it SEES to zero, and it sees
@@ -438,6 +489,7 @@ FLAG_FILES = {
     "quiet": QUIET_FILE,
     "ab": AB_FILE,
     "causation": CAUSATION_FILE,
+    "noslew": NOSLEW_FILE,
 }
 
 
@@ -665,6 +717,12 @@ class Injector:
         # right now, which is the only reason to look at this number at all.
         self.fresh_ms_last = None
         self._src_change_ts = 0.0       # when the value we just read was published
+        # rise slew limiter
+        self._slew_ref_w = None         # last effective value, the anchor for the rise
+        self._slew_ref_ts = 0.0
+        self.slew_clamps = 0            # cycles where a rise was held back
+        self.slew_worst_w = 0.0         # largest single rise suppressed, watts
+        self.slew_held_w = 0.0          # sum of watts withheld, for a mean
         # poll/write decoupling
         self._last_src_w = None         # meter value at the last write
         self.polls = 0                  # meter polls
@@ -1146,6 +1204,43 @@ class Injector:
             return v1, "bound", self._mb.last_change_ts
         return None, None, 0.0
 
+    def _slew_limit(self, w, now):
+        """Clamp how fast the injected reading may RISE. Falls pass untouched.
+
+        Returns the value to regulate on. Never returns more than `w`, so this can
+        only ever command LESS inverter output than the raw reading would, and a bug
+        here therefore fails toward import rather than toward export.
+
+        Called once per cycle and stateful, so it must not be called twice for the
+        same reading: the second call would re-anchor on the first call's output and
+        let the clamp walk upward a step at a time.
+        """
+        if self.flags.get("noslew"):
+            # Still track the anchor, so toggling the flag back on does not clamp
+            # against a reference from minutes ago.
+            self._slew_ref_w, self._slew_ref_ts = w, now
+            return w
+
+        dt = now - self._slew_ref_ts
+        # dt of exactly zero is NOT a reset: two reads in the same instant means no
+        # time has passed, so the rise allowance is the floor, not everything. Only a
+        # negative dt (the clock moved backwards) or a real gap abandons the anchor,
+        # because in both of those cases the anchor is not evidence about now.
+        if self._slew_ref_w is None or dt < 0 or dt > SLEW_RESET_SEC:
+            self._slew_ref_w, self._slew_ref_ts = w, now
+            return w
+
+        ceiling = self._slew_ref_w + max(SLEW_UP_MIN_W, SLEW_UP_W_PER_SEC * dt)
+        if w > ceiling:
+            held = w - ceiling
+            self.slew_clamps += 1
+            self.slew_held_w += held
+            self.slew_worst_w = max(self.slew_worst_w, held)
+            w = ceiling
+
+        self._slew_ref_w, self._slew_ref_ts = w, now
+        return w
+
     async def _read_http(self):
         """The original RPC path. Returns watts or None."""
         try:
@@ -1439,10 +1534,15 @@ class Injector:
             log(
                 "EFINJECT START poll=%.2fs keepalive=%.2fs meter=%s model=%s bias=%+dW%s "
                 "fade_to_zero_at=%+.0fW (expect real grid to settle near %+.0fW "
-                "import; full bias only applies at or below 0W)",
+                "import; full bias only applies at or below 0W) rise_slew=%s",
                 POLL_PERIOD_SEC, KEEPALIVE_SEC, sn, model, bias_now,
                 "" if bias_now == BIAS_W else " (override, default %+dW)" % BIAS_W,
                 BIAS_FADE_W, bias_settle_w(bias_now),
+                (
+                    "DISABLED (%s present)" % NOSLEW_FILE
+                    if self.flags.get("noslew")
+                    else "%.0fW/s, min %.0fW" % (SLEW_UP_W_PER_SEC, SLEW_UP_MIN_W)
+                ),
             )
             self.running = True
             self._t_start = time.time()
@@ -1565,6 +1665,13 @@ class Injector:
                     await self._pace()
                     continue
 
+                # Do not chase a spike we cannot outrun. See SLEW_UP_W_PER_SEC.
+                # Deliberately AFTER the CLOUD arm's `continue`, so the counters only
+                # ever describe cycles that actually injected, which is what makes the
+                # A/B comparison honest. Exactly one call per cycle: this is stateful.
+                w_true = w
+                w = self._slew_limit(w, now)
+
                 # Poll/write decoupling. We poll at POLL_PERIOD_SEC to notice a new
                 # meter value quickly, but there is nothing to gain from re-sending a
                 # value the device already has, so only write when the reading actually
@@ -1656,9 +1763,9 @@ class Injector:
                         del self._recent_sent[:-40]
                     if self._verbose():
                         dbg(
-                            "EFINJECT send #%d true=%.0fW bias=%+d c=%dW batt=%s "
-                            "read=%.0fms ble=%.0fms",
-                            self.sent, w, bias, self.last_sent_w, self.batt_w,
+                            "EFINJECT send #%d true=%.0fW slewed=%.0fW bias=%+d c=%dW "
+                            "batt=%s read=%.0fms ble=%.0fms",
+                            self.sent, w_true, w, bias, self.last_sent_w, self.batt_w,
                             read_ms, send_ms,
                         )
                     # Compact liveness at WARNING so the log stays readable but the
@@ -1666,10 +1773,13 @@ class Injector:
                     if self._last_send_ts - self._last_hb >= HEARTBEAT_SEC:
                         self._last_hb = self._last_send_ts
                         log(
+                            # `true` is the RAW meter reading. The value actually
+                            # injected is `c`, which carries both the slew clamp and
+                            # the bias, so the two differing is normal, not a fault.
                             "EFINJECT hb sent=%d true=%.0fW bias=%+d c=%dW batt=%s "
                             "frame_age=%.1fs err=%d not_ready=%d silent=%d swaps=%d "
                             "via=%s read=%.0fms stale=%.0fms",
-                            self.sent, w, bias, self.last_sent_w, self.batt_w,
+                            self.sent, w_true, bias, self.last_sent_w, self.batt_w,
                             self._last_send_ts - self._last_frame_ts,
                             self.write_err, self.skipped_not_ready,
                             self.skipped_silent, self.device_swaps,
@@ -1731,6 +1841,7 @@ class Injector:
                         "| via=%s mb_ok=%d mb_err=%d mb_reopens=%d "
                         "| polls=%d w_chg=%d w_keep=%d nowrite=%d rate=%.2f/s "
                         "stale_avg=%.0fms "
+                        "| SLEW %s clamps=%d worst=%.0fW mean_held=%.0fW "
                         "| SEC(%s) ok=%d err=%d used=%d d_now=%+.1fW/%d d_last=%+.1fW "
                         "d_absmax=%.0fW "
                         "| GUARD interleave=%s verdicts=%d busy=%d bad=%d good=%d/%d "
@@ -1755,6 +1866,12 @@ class Injector:
                         (
                             self.fresh_ms_sum / self.fresh_ms_n
                             if self.fresh_ms_n else float("nan")
+                        ),
+                        "OFF(noslew file)" if self.flags.get("noslew") else "ON",
+                        self.slew_clamps, self.slew_worst_w,
+                        (
+                            self.slew_held_w / self.slew_clamps
+                            if self.slew_clamps else 0.0
                         ),
                         self._second_mode, self._mb2.reads, self._mb2.err,
                         self.sec_used,
@@ -1861,6 +1978,13 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "writes_on_change": inj.writes_on_change,
                 "writes_keepalive": inj.writes_keepalive,
                 "polls_no_write": inj.polls_no_write,
+                "slew_enabled": not inj.flags.get("noslew"),
+                "slew_clamps": inj.slew_clamps,
+                "slew_worst_w": round(inj.slew_worst_w, 1),
+                "slew_mean_held_w": (
+                    round(inj.slew_held_w / inj.slew_clamps, 1)
+                    if inj.slew_clamps else 0.0
+                ),
                 "send_rate_hz": (
                     round(inj.sent / (time.time() - inj._t_start), 2)
                     if inj._t_start else None
