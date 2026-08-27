@@ -10,6 +10,10 @@ class PacketReceiveError(Exception):
     """Error during receiving packet"""
 
 
+class NotConnectedError(Exception):
+    """Raised when a command cannot be delivered because the BLE link is unavailable"""
+
+
 class FailedToAuthenticate(Exception):
     """Failed to connect"""
 
@@ -96,6 +100,8 @@ class AuthErrors:
 
 class UnsupportedBluetoothProtocol(Exception):
     def __init__(self, characteristic_type: str, available_characteristics: list[str]):
+        self.characteristic_type = characteristic_type
+        self.available_characteristics = available_characteristics
         characteristics = "\n    ".join(available_characteristics)
         super().__init__(
             f"Device is using unsupported protocol for {characteristic_type}.\n"

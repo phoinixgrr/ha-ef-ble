@@ -193,14 +193,15 @@
           "extra_battery": "Enabled Extra Batteries"
         }
       },
-      "connecting": {
+      "connect": {
         "title": "Connecting to device"
       }
     },
     "progress": {
-      "connecting": "Connecting to device...",
-      "authenticating": "Connection successful, running authentication procedure...",
-      "disconnecting": "Sucess! Disconnecting from device..."
+      "connecting": "Establishing Bluetooth connection to {name}...",
+      "exchanging_keys": "Connected to {name}, exchanging encryption keys...",
+      "authenticating": "Authenticating with {name}...",
+      "finalizing": "Finishing the connection check..."
     }
   },
   "options": {
@@ -285,6 +286,9 @@
     },
     "failed_after_successful_connection": {
       "message": "Device connected but did not get to auth procedure, last state: {last_state}"
+    },
+    "missing_address_or_user_id": {
+      "message": "Stored configuration is missing the device {missing}. Remove the device and add it again to repair the configuration entry."
     }
   },
   "issues": {
@@ -295,6 +299,9 @@
   },
   "entity": {
     "button": {
+      "power_off": {
+        "name": "Power Off"
+      },
       "unpause_solar": {
         "name": "Unpause Solar"
       }
@@ -339,6 +346,12 @@
       "storm_mode": {
         "name": "Storm Mode"
       },
+      "grid_is_energized": {
+        "name": "Grid Energized"
+      },
+      "backup_channel_signal_line": {
+        "name": "Channel {channel} Signal Line"
+      },
       "grid_status": {
         "name": "Grid Status"
       },
@@ -379,6 +392,12 @@
       },
       "battery_level": {
         "name": "Battery Level"
+      },
+      "lcd_battery_level": {
+        "name": "LCD Battery Level"
+      },
+      "bms_battery_level": {
+        "name": "BMS Battery Level"
       },
       "battery_time_remaining": {
         "name": "Battery Time Remaining"
@@ -467,10 +486,36 @@
         "name": "Grid Energy"
       },
       "circuit_power": {
-        "name": "Circuit Power {index}"
+        "name": "C{index} {name} Power"
       },
       "circuit_current": {
         "name": "Circuit Current {index}"
+      },
+      "circuit_voltage": {
+        "name": "Circuit Voltage {index}"
+      },
+      "circuit_status": {
+        "name": "C{index} {name} Status",
+        "state": {
+          "unknown": "Unknown",
+          "off": "Off",
+          "on_grid": "On (Grid)",
+          "on_back": "On (Backup)",
+          "em_stop": "Emergency Stop"
+        }
+      },
+      "backup_channel_type": {
+        "name": "Channel {channel} Type",
+        "state": {
+          "unknown": "Unknown",
+          "none": "None",
+          "battery": "Battery",
+          "oil": "Smart Generator",
+          "station_charger": "Station Charger"
+        }
+      },
+      "circuit_name": {
+        "name": "Circuit {index} Name"
       },
       "channel_power": {
         "name": "Channel Power {index}"
@@ -577,6 +622,12 @@
       "cell_temperature": {
         "name": "Cell Temperature"
       },
+      "max_cell_voltage": {
+        "name": "Max Cell Voltage"
+      },
+      "min_cell_voltage": {
+        "name": "Min Cell Voltage"
+      },
       "dc_port_input_power": {
         "name": "DC Port Input Power"
       },
@@ -618,6 +669,12 @@
       },
       "dc_hv_input_state": {
         "name": "HV DC Input Port State"
+      },
+      "ac_lv_tt30_output_power": {
+        "name": "AC LV TT-30 Output Power"
+      },
+      "state_of_health": {
+        "name": "State of Health"
       },
       "engine_state": {
         "name": "Engine State",
@@ -989,6 +1046,13 @@
           "intelligent_schedule": "Intelligent Schedule"
         }
       },
+      "energy_monitoring_mode": {
+        "name": "Energy Monitoring",
+        "state": {
+          "semi_automated": "Semi-Automated Monitoring",
+          "smart_meter": "Smart Meter Monitoring"
+        }
+      },
       "operating_submode": {
         "name": "Operating Submode",
         "state": {
@@ -997,6 +1061,13 @@
           "max": "Max",
           "sleep": "Sleep",
           "eco": "Eco"
+        }
+      },
+      "power_supply_priority": {
+        "name": "Power Supply Priority",
+        "state": {
+          "power_supply": "Power Supply",
+          "power_storage": "Power Storage"
         }
       }
     },
@@ -1021,6 +1092,9 @@
       },
       "base_load_power": {
         "name": "Base Load Power"
+      },
+      "load_power": {
+        "name": "Load Power"
       },
       "grid_in_power_limit": {
         "name": "Grid Input Power Limit"
@@ -1068,7 +1142,7 @@
     },
     "switch": {
       "circuit_is_enabled": {
-        "name": "Circuit {circuit}"
+        "name": "C{circuit} {name}"
       },
       "channel_is_enabled": {
         "name": "Channel {channel}"
@@ -1078,6 +1152,9 @@
       },
       "eps_mode": {
         "name": "EPS Mode"
+      },
+      "storm_guard": {
+        "name": "Storm Guard"
       },
       "dc_ports": {
         "name": "DC Ports"
@@ -1129,6 +1206,9 @@
       },
       "discharging_task_enabled": {
         "name": "Discharging Task"
+      },
+      "feed_protect": {
+        "name": "Feed-in Control"
       }
     }
   },

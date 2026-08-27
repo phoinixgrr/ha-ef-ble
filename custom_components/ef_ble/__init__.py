@@ -47,7 +47,7 @@ from .eflib.connection import (
     ConnectionTimeout,
     MaxConnectionAttemptsReached,
 )
-from .eflib.exceptions import AuthErrors
+from .eflib.exceptions import AuthErrors, UnsupportedBluetoothProtocol
 from .eflib.logging_util import ConnectionLog
 
 PLATFORMS: list[Platform] = [
@@ -108,7 +108,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> bo
     )
 
     if address is None or user_id is None:
-        return False
+        # Returning False here would fail setup without any log or UI message
+        # (issue #403) - raise instead so the user sees what is wrong
+        raise ConfigEntryError(
+            translation_key="missing_address_or_user_id",
+            translation_placeholders={
+                "missing": "address" if address is None else "user ID"
+            },
+        )
 
     if not bluetooth.async_address_present(hass, address):
         _register_reappear_callback(hass, entry, address)
@@ -159,7 +166,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: DeviceConfigEntry) -> bo
         )
         async with asyncio.timeout(timeout):
             state = await device.wait_until_authenticated_or_error(raise_on_error=True)
-    except (ConnectionTimeout, BleakError, TimeoutError) as e:
+    except (
+        ConnectionTimeout,
+        BleakError,
+        TimeoutError,
+        UnsupportedBluetoothProtocol,
+    ) as e:
         await device.disconnect()
         raise ConfigEntryNotReady(
             translation_key="could_not_connect",
