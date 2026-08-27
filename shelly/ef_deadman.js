@@ -42,13 +42,21 @@
 
 // TIMING BUDGET, measured not guessed. Re-enabling Shelly Cloud reaches Shelly Cloud in
 // 4 s and EcoFlow resumes writing cfg_cloud_metter 8 s after that (measured 2026-08-27).
-// Worst case to a regulating cloud is timeoutSec + tickMs + 8 s = 43 s. The existing hard
-// stop cuts the plug at export >200 W sustained for 60 s, so 30 s here leaves ~17 s of
+// Worst case to a regulating cloud is timeoutSec + tickMs + 8 s = 33 s. The existing hard
+// stop cuts the plug at export >200 W sustained for 60 s, so 20 s here leaves ~27 s of
 // margin and the plug should not fire for an ordinary outage. Raising timeoutSec above
 // ~45 s would invert that order and make every outage end with the plant switched off
 // awaiting a manual restore.
+//
+// LOWER BOUND. Do not take timeoutSec to the beat cadence. Measured beat jitter over 14
+// samples was min 9.80 s, median 10.00 s, max 10.20 s, and sys.uptime here is integer
+// seconds, so 10 s would tolerate zero late beats and false-trip. 20 s still absorbs one
+// missed beat plus jitter. The cost asymmetry also favours the larger number: a real
+// outage at ~1880 W of export costs ~10 Wh per 20 s, while a spurious engagement costs
+// ~0.1 Wh of extra leak, so trading a little detection latency for no false trips is
+// cheap in both directions.
 let CFG = {
-  timeoutSec: 30,    // no heartbeat for this long -> restore the cloud
+  timeoutSec: 20,    // no heartbeat for this long -> restore the cloud
   recoverSec: 120,   // heartbeat healthy this long -> cut the cloud again
   tickMs: 5000,      // evaluation period
 };
