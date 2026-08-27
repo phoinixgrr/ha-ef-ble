@@ -174,8 +174,8 @@ INTERLEAVE_FILE = "/config/ef_inject_interleave"
 # simply have no opinion, which is the honest position.
 #
 # THAT GATE THEN FALSE-TRIPPED TOO (2026-08-25 07:07:56, "-128W mean of 40
-# samples"), because it only tested the BOUND meter for flatness. A resistive load
-# switches instantaneously, so the bound meter can sit flat at 400W across the
+# samples"), because it only tested the SOLAR meter for flatness. A resistive load
+# switches instantaneously, so the solar meter can sit flat at 400W across the
 # whole window while the grid meter, having already published the edge, reads
 # 1600W: flat by the gate's test, 1200W apart in fact. Measured diffs reached
 # +/-1200W with SYMMETRIC sign while the same pair agreed to within 25W on every
@@ -783,18 +783,18 @@ class Injector:
         self.skipped_silent = 0         # refusals for a connected-but-silent link
         self._last_hb = 0.0             # last heartbeat line
         # meter transport
-        self._mb = ModbusMeter(MODBUS_HOST, "bound")     # the meter EcoFlow is bound to
+        self._mb = ModbusMeter(MODBUS_HOST, "solar")     # the meter EcoFlow is bound to
         self._mb2 = ModbusMeter(SECOND_HOST, "grid")     # second opinion / interleave
         self._mb_mode = None            # last observed state of the toggle file
         self._second_mode = None        # last observed state of shadow/interleave
         self.transport = None           # "modbus" | "http", as last actually used
         # second-meter accounting
         self.sec_used = 0               # writes that took the SECOND meter's value
-        self.sec_diffs = []             # (v_bound - v_grid), QUIET samples only
+        self.sec_diffs = []             # (v_solar - v_grid), QUIET samples only
         self.sec_diff_absmax = 0.0
         self.sec_diff_last = float("nan")   # mean of the last completed verdict
         self.interleave_locked = False  # latched off after sustained divergence
-        self._quiet_hist = []           # (ts, v_bound, v_grid) for the quiescence gate
+        self._quiet_hist = []           # (ts, v_solar, v_grid) for the quiescence gate
         self.sec_bad_run = 0            # consecutive over-limit verdicts
         self.sec_good_run = 0           # consecutive within-recover-limit verdicts
         self.sec_verdicts = 0           # completed verdicts this session
@@ -1174,7 +1174,7 @@ class Injector:
         attributable to the instruments. This is what makes a short window
         trustworthy instead of merely diluted.
 
-        BOTH series have to be flat, not just the bound one. A step the bound meter
+        BOTH series have to be flat, not just the solar one. A step the solar meter
         has not published yet is still a step, and it lands entirely in the
         difference: see the 2026-08-25 espresso trip in the notes above. Requiring
         both costs only verdict rate, which there is plenty of.
@@ -1245,7 +1245,7 @@ class Injector:
             log(
                 "EFINJECT INTERLEAVE LOCKED OFF: %s and %s disagree by %+.0fW across "
                 "%d consecutive quiet windows of %d samples (limit %.0fW). Falling "
-                "back to the bound meter alone. It will re-enable ITSELF after %d "
+                "back to the solar meter alone. It will re-enable ITSELF after %d "
                 "consecutive verdicts within %.0fW%s. No action needed from you.",
                 MODBUS_HOST, SECOND_HOST, mean, self.sec_bad_run,
                 INTERLEAVE_DIVERGE_WINDOW, INTERLEAVE_DIVERGE_W,
@@ -1281,7 +1281,7 @@ class Injector:
         )
 
     async def _read_meters(self):
-        """Read the bound meter, and the second one if wanted, concurrently.
+        """Read the solar meter, and the second one if wanted, concurrently.
 
         Returns (watts, source_name, change_ts) or (None, None, 0.0).
         """
@@ -1302,14 +1302,14 @@ class Injector:
                 if self._mb2.last_change_ts > self._mb.last_change_ts:
                     self.sec_used += 1
                     return v2, "grid", self._mb2.last_change_ts
-                return v1, "bound", self._mb.last_change_ts
+                return v1, "solar", self._mb.last_change_ts
             # Redundancy: either meter alone still keeps regulation alive. This is
             # the failure independence that a wired link would have bought.
             if v1 is None and v2 is not None:
                 self.sec_used += 1
                 return v2, "grid", self._mb2.last_change_ts
         if v1 is not None:
-            return v1, "bound", self._mb.last_change_ts
+            return v1, "solar", self._mb.last_change_ts
         return None, None, 0.0
 
     def _slew_limit(self, w, now):

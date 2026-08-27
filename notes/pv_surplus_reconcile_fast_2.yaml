@@ -1,0 +1,73 @@
+alias: ☀️ PV Surplus — BLE Amp Reconcile (fast) - 2
+description: >-
+  Targets amps directly from the surplus balance, one write, no stepping. Surplus
+  is SIGNED BATTERY POWER (+ charging, - discharging), not grid import: ef_inject
+  pins phase C to zero, so phase C carries no surplus information and the previous
+  version reduced to target = N-1 for every N, a ratchet to min_amps that could
+  never raise. Phase C stays as a correction term, which self-limits the loop when
+  the inverter saturates. Unit 2 is not summed, its power sensors read 0 or go
+  stale. Stale battery blocks bumps but still allows drops. The dead band is
+  SYMMETRIC (bump_hysteresis_w up, drop_hysteresis_w down) because measurement
+  showed every export event is an amp-change transient: the car's load moves
+  faster than the inverter can ramp, so the quantity to minimise is the NUMBER of
+  changes, not the steady-state error. Drops are slowed too, which is safe: a late
+  drop causes import, never export. max_amps subtracts
+  base_load_w from inverter_max_w, or it settles at max amps with permanent
+  import. Near full, discharge is not subtracted and hold_bias_w makes that branch
+  hold instead of ratcheting; it cannot climb, which needs a PV headroom signal.
+triggers:
+  - trigger: time_pattern
+    seconds: /10
+conditions:
+  - condition: state
+    entity_id: select.goe_294607_frc
+    state: '2'
+  - condition: state
+    entity_id: input_boolean.ev_pv_surplus_enabled
+    state: 'on'
+  - condition: template
+    value_template: '{{ should_change }}'
+actions:
+  - action: number.set_value
+    target:
+      entity_id: number.esp32_piloti_charging_amps
+    data:
+      value: '{{ target_amps }}'
+variables:
+  amp_watts: 230
+  safety_margin_w: 100
+  bump_hysteresis_w: 120
+  drop_hysteresis_w: 120
+  inverter_max_w: 2130
+  base_load_w: 300
+  min_amps: 1
+  min_dwell_down_s: 90
+  min_dwell_up_s: 120
+  max_batt_age_s: 60
+  near_full_margin_pct: 5
+  max_amps: "{{ [ ((((inverter_max_w | float(2130)) - (base_load_w | float(300))) / (amp_watts | float(230))) | int(7)), 1 ] | max }}"
+  phase_c_grid_w: "{{ states('sensor.shellypro3em_c8f09e8946fc_phase_c_active_power') | float(0) }}"
+  current_ble_amps: "{{ states('number.esp32_piloti_charging_amps') | int(2) }}"
+  ultra_soc: "{{ states('sensor.combined_battery_soc') | float(0) }}"
+  ultra_charge_limit: "{{ [ states('number.ecoflow_stream_ultra_ble_charge_limit') | float(100), states('number.solar_mpalkoni_stream_ultra_2_battery_charge_limit_max') | float(100) ] | min }}"
+  near_full: "{{ 1 if (ultra_soc | float(0)) >= ((ultra_charge_limit | float(100)) - (near_full_margin_pct | float(5))) else 0 }}"
+  batt_raw: "{{ states('sensor.ecoflow_stream_ultra_ble_battery_power') }}"
+  batt_age_s: "{% set o = states.sensor.ecoflow_stream_ultra_ble_battery_power %}{{ 99999 if o is none else ((as_timestamp(now()) - as_timestamp(o.last_updated, 0)) | round(0)) }}"
+  batt_fresh: "{{ 1 if (batt_raw not in ['unknown', 'unavailable', 'none', ''] and (batt_age_s | int(99999)) <= (max_batt_age_s | int(60))) else 0 }}"
+  batt_signed_w: "{{ states('sensor.ecoflow_stream_ultra_ble_battery_power') | float(0) }}"
+  load_from_batt_w: "{{ states('sensor.ecoflow_stream_ultra_ble_load_from_battery') | float(0) }}"
+  batt_charge_w: "{{ [ batt_signed_w | float(0), 0 ] | max | round(0) }}"
+  batt_drain_w: "{{ [ (0 - (batt_signed_w | float(0))), load_from_batt_w | float(0), 0 ] | max | round(0) }}"
+  batt_term_w: "{{ (batt_charge_w | float(0)) - (0 if (near_full | int(0)) == 1 else (batt_drain_w | float(0))) }}"
+  car_now_w: "{{ (current_ble_amps | int(2)) * (amp_watts | int(230)) }}"
+  hold_bias_w: "{{ (amp_watts | int(230)) if (near_full | int(0)) == 1 else 0 }}"
+  available_w: "{{ (car_now_w | float(0)) + (batt_term_w | float(0)) - (phase_c_grid_w | float(0)) - (safety_margin_w | float(100)) + (hold_bias_w | float(0)) }}"
+  target_down: "{{ [ [ ((((available_w | float(0)) + (drop_hysteresis_w | float(120))) / (amp_watts | float(230))) | int(0)), min_amps | int(1) ] | max, max_amps | int(9) ] | min }}"
+  target_up: "{{ [ [ ((((available_w | float(0)) - (bump_hysteresis_w | float(120))) / (amp_watts | float(230))) | int(0)), min_amps | int(1) ] | max, max_amps | int(9) ] | min }}"
+  secs_since_change: "{% set o = states.number.esp32_piloti_charging_amps %}{{ 99999 if o is none else ((as_timestamp(now()) - as_timestamp(o.last_changed, 0)) | round(0)) }}"
+  going_down: "{{ 1 if (current_ble_amps | int(0)) > (target_down | int(0)) else 0 }}"
+  going_up: "{{ 1 if ((target_up | int(0)) > (current_ble_amps | int(0)) and (batt_fresh | int(0)) == 1) else 0 }}"
+  target_amps: "{{ target_down if (going_down | int(0)) == 1 else target_up }}"
+  should_change: "{{ ((going_down | int(0)) == 1 and (secs_since_change | int(0)) >= (min_dwell_down_s | int(90))) or ((going_up | int(0)) == 1 and (secs_since_change | int(0)) >= (min_dwell_up_s | int(120))) }}"
+mode: single
+max_exceeded: silent

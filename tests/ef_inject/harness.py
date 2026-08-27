@@ -39,6 +39,12 @@ _cv = types.ModuleType("homeassistant.helpers.config_validation")
 _cv.empty_config_schema = lambda domain: None
 _dr = types.ModuleType("homeassistant.helpers.device_registry")
 _dr.async_get = lambda hass: None
+# EfInjectRuntime is a NamedTuple, and NamedTuple evaluates its annotations at CLASS
+# CREATION time, not lazily. So `device_entry: dr.DeviceEntry` is a hard import-time
+# dependency: without this the whole module fails to load and EVERY suite dies before
+# a single check runs, with an AttributeError that looks nothing like a missing stub.
+class DeviceEntry: pass
+_dr.DeviceEntry = DeviceEntry
 _disp = types.ModuleType("homeassistant.helpers.dispatcher")
 _disp.async_dispatcher_send = lambda hass, signal, *a: None
 

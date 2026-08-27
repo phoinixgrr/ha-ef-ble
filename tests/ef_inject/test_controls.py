@@ -488,7 +488,7 @@ ck(
     metrics["transport"].native_value == "modbus",
     "the per-cycle meter suffix is stripped, so the link state is stable  <-- was a bug",
 )
-inj.transport = "modbus:bound"
+inj.transport = "modbus:solar"
 ck(
     metrics["transport"].native_value == "modbus",
     "and the state does not move when only the winning meter changes",

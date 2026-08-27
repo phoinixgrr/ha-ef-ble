@@ -154,9 +154,9 @@ def test_divergence():
        % inj.sec_skipped_busy)
 
     # --- a STEP in the OTHER meter: the 2026-08-25 espresso false trip ----------
-    # A resistive element switches instantaneously. The bound meter can read a
+    # A resistive element switches instantaneously. The solar meter can read a
     # perfectly flat 400W across the whole window while the grid meter, having
-    # already published the edge 0.412s earlier, reads 1600W. Gating on the bound
+    # already published the edge 0.412s earlier, reads 1600W. Gating on the solar
     # meter alone called that quiet and averaged the step into a verdict: -128W of
     # exactly this locked the interleave off in production at 07:07:56.
     inj = new_injector(FakeDevice())
@@ -166,7 +166,7 @@ def test_divergence():
         clk.feed(inj, 3, 400.0, 400.0)        # element off, both meters agree
         clk.feed(inj, 1, 400.0, 1600.0)       # element on, only the grid has it yet
     ck(inj.sec_verdicts == 0,
-       "a 1200W step in the GRID meter while the bound meter reads flat yields NO "
+       "a 1200W step in the GRID meter while the solar meter reads flat yields NO "
        "verdict (%d), so a switching resistive load cannot lock the guard  <-- the "
        "espresso false trip" % inj.sec_verdicts)
     ck(not inj.interleave_locked,
@@ -426,19 +426,19 @@ async def test_selection():
 
         inj = rig(100.0, 102.0, 30.0, 20.0)
         w, src, ts = await inj._read_meters()
-        ck((w, src) == (100.0, "bound"),
-           "when the bound meter is fresher it is used (%r)" % ((w, src),))
+        ck((w, src) == (100.0, "solar"),
+           "when the solar meter is fresher it is used (%r)" % ((w, src),))
         ck(inj.sec_used == 0, "not counted as a second-meter use")
 
         # redundancy: this is the failure independence a wired link would have bought
         inj = rig(None, 77.0, 0.0, 20.0)
         w, src, _ = await inj._read_meters()
         ck((w, src) == (77.0, "grid"),
-           "bound meter DEAD -> the second meter keeps regulation alive (%r)" % ((w, src),))
+           "solar meter DEAD -> the second meter keeps regulation alive (%r)" % ((w, src),))
 
         inj = rig(55.0, None, 20.0, 0.0)
         w, src, _ = await inj._read_meters()
-        ck((w, src) == (55.0, "bound"), "second meter dead -> bound meter used")
+        ck((w, src) == (55.0, "solar"), "second meter dead -> solar meter used")
 
         inj = rig(None, None, 0.0, 0.0)
         w, src, ts = await inj._read_meters()
@@ -450,8 +450,8 @@ async def test_selection():
         touch(efi.SHADOW_FILE)
         inj = rig(100.0, 102.0, 10.0, 20.0)
         w, src, _ = await inj._read_meters()
-        ck((w, src) == (100.0, "bound"),
-           "SHADOW returns the bound meter even when the other is fresher (%r)"
+        ck((w, src) == (100.0, "solar"),
+           "SHADOW returns the solar meter even when the other is fresher (%r)"
            % ((w, src),))
         ck(inj.sec_diff_absmax == 2.0,
            "shadow still polled the second meter and recorded the difference (%.1fW)"
@@ -464,14 +464,14 @@ async def test_selection():
         inj = rig(None, 102.0, 0.0, 20.0)
         w, src, _ = await inj._read_meters()
         ck((w, src) == (None, None),
-           "SHADOW with a dead bound meter does NOT silently switch source")
+           "SHADOW with a dead solar meter does NOT silently switch source")
 
         # locked latch behaves exactly like shadow
         touch(efi.INTERLEAVE_FILE)
         inj = rig(100.0, 102.0, 10.0, 20.0)
         inj.interleave_locked = True
         w, src, _ = await inj._read_meters()
-        ck((w, src) == (100.0, "bound"), "once latched, the bound meter is used again")
+        ck((w, src) == (100.0, "solar"), "once latched, the solar meter is used again")
 
         # second meter not polled at all when off
         clear_toggles()
@@ -503,7 +503,7 @@ async def test_pacing():
     efi.KEEPALIVE_SEC = 0.04          # below the poll period, so every poll writes
     dev = FakeDevice("A", send_delay=0.02)
     inj = new_injector(dev)
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
 
     t0 = time.time()
@@ -548,7 +548,7 @@ async def test_write_gate():
     efi.KEEPALIVE_SEC = 0.20
     dev = FakeDevice("A")
     inj = new_injector(dev)
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
 
     await drive(inj, 0.9)
@@ -577,7 +577,7 @@ async def test_write_gate():
     # ---- a changed reading is written promptly ---------------------------
     dev2 = FakeDevice("B")
     inj2 = new_injector(dev2)
-    inj2._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj2._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj2._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
 
     async def wiggle():
@@ -626,9 +626,9 @@ async def test_write_gate():
 # =========================================================================
 async def test_live_interleave():
     clear_toggles()
-    bound = await FakeShelly(800.0).start()
+    solar = await FakeShelly(800.0).start()
     grid = await FakeShelly(802.0).start()
-    ck(bound.port != grid.port, "two independent fake meters")
+    ck(solar.port != grid.port, "two independent fake meters")
 
     efi.POLL_PERIOD_SEC = 0.02
     efi.KEEPALIVE_SEC = 0.05
@@ -640,7 +640,7 @@ async def test_live_interleave():
     # Two distinct endpoints. This is the check that caught the port being read from
     # the module global: both meters then pointed at the SAME socket, the second one
     # always timestamped a hair later, and it looked like a 100% interleave win.
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound", port=bound.port)
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar", port=solar.port)
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid", port=grid.port)
 
     async def churn():
@@ -650,7 +650,7 @@ async def test_live_interleave():
             await asyncio.sleep(0.05)
             grid.value = 800.0 + 40 * i + 2.0
             await asyncio.sleep(0.05)
-            bound.value = 800.0 + 40 * i
+            solar.value = 800.0 + 40 * i
 
     task = asyncio.create_task(inj.run())
     await churn()
@@ -658,7 +658,7 @@ async def test_live_interleave():
     await asyncio.wait_for(task, timeout=3.0)
 
     ck(inj._mb.reads > 10 and inj._mb2.reads > 10,
-       "both meters were read (bound=%d grid=%d)" % (inj._mb.reads, inj._mb2.reads))
+       "both meters were read (solar=%d grid=%d)" % (inj._mb.reads, inj._mb2.reads))
     ck(inj.sec_used > 0,
        "the second meter was actually used for some samples (%d)" % inj.sec_used)
     ck(inj.sec_used < inj._mb.reads,
@@ -674,7 +674,7 @@ async def test_live_interleave():
     ck(inj.transport.startswith("modbus:"),
        "transport names the meter actually used: %r" % inj.transport)
 
-    await bound.stop()
+    await solar.stop()
     await grid.stop()
     clear_toggles()
 
@@ -693,7 +693,7 @@ async def test_gates_still_ordered():
     # A silent link must produce ZERO writes no matter how the write gate feels.
     dev = FakeDevice("A")
     inj = new_injector(dev)
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     task = asyncio.create_task(inj.run())
     await asyncio.sleep(0.1)
@@ -714,7 +714,7 @@ async def test_gates_still_ordered():
     dev2 = FakeDevice("B")
     inj2 = new_injector(dev2)
     inj2.identity = (True, 3, "WRONGSN00000", 0, 0)
-    inj2._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj2._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj2._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     await asyncio.wait_for(inj2.run(), timeout=3.0)
     ck(len(dev2.sends) == 0,
@@ -750,7 +750,7 @@ async def test_bias_override_on_the_wire():
         f.write("-40")
     dev = FakeDevice("A")
     inj = new_injector(dev)
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     await drive(inj, 0.4)
 
@@ -764,7 +764,7 @@ async def test_bias_override_on_the_wire():
     # Change it mid-flight. This is the whole point: no restart.
     dev2 = FakeDevice("B")
     inj2 = new_injector(dev2)
-    inj2._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj2._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj2._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     task = asyncio.create_task(inj2.run())
     await asyncio.sleep(0.25)
@@ -791,7 +791,7 @@ async def test_bias_override_on_the_wire():
     # A typo mid-flight must not change what is written.
     dev3 = FakeDevice("C")
     inj3 = new_injector(dev3)
-    inj3._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj3._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj3._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     task = asyncio.create_task(inj3.run())
     await asyncio.sleep(0.2)
@@ -822,7 +822,7 @@ async def test_bias_override_on_the_wire():
         f.write("-40")
     dev4 = FakeDevice("D")
     inj4 = new_injector(dev4)
-    inj4._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj4._mb = efi.ModbusMeter("127.0.0.1", "solar")
     inj4._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
     await drive(inj4, 0.4)
     ck(inj4.hass.executor_jobs == 1,

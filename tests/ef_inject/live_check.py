@@ -2,14 +2,14 @@
 with the HTTP RPC. No writes, no EcoFlow traffic.
 
 Also measures what the interleave would actually have bought: for each cycle, how
-much fresher the chosen meter's publication is than the bound meter's.
+much fresher the chosen meter's publication is than the solar meter's.
 """
 import sys, asyncio, json, time, urllib.request
 from harness import load
 
 efi = load()
 
-BOUND = efi.MODBUS_HOST
+SOLAR = efi.MODBUS_HOST
 GRID = efi.SECOND_HOST
 
 
@@ -19,12 +19,12 @@ def http_c():
 
 
 async def main():
-    m1 = efi.ModbusMeter(BOUND, "bound")
+    m1 = efi.ModbusMeter(SOLAR, "solar")
     m2 = efi.ModbusMeter(GRID, "grid")
     lat = []
     gains = []
     diffs = []
-    print("  #   bound      grid     http    diff   gain    ms")
+    print("  #   solar      grid     http    diff   gain    ms")
     for i in range(20):
         t0 = time.time()
         v1, v2 = await asyncio.gather(m1.read(), m2.read())
@@ -49,7 +49,7 @@ async def main():
     await m2.close()
 
     lat.sort()
-    print("\nbound ok=%d err=%d reopens=%d | grid ok=%d err=%d reopens=%d"
+    print("\nsolar ok=%d err=%d reopens=%d | grid ok=%d err=%d reopens=%d"
           % (m1.reads, m1.err, m1.reopens, m2.reads, m2.err, m2.reopens))
     print("paired read latency p50=%.1fms p95=%.1fms max=%.1fms"
           % (lat[len(lat) // 2], lat[int(len(lat) * 0.95)], lat[-1]))

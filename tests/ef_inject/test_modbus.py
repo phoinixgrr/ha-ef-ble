@@ -105,7 +105,7 @@ async def main():
     # ---- read path through the Injector ---------------------------------
     touch(efi.MODBUS_FILE)
     inj = efi.Injector(object())
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")     # nothing listening now
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")     # nothing listening now
     inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
 
     calls = []
@@ -146,7 +146,7 @@ async def main():
     srv2 = await FakeShelly(99999.0).start()
     efi.MODBUS_PORT = srv2.port
     touch(efi.MODBUS_FILE)
-    inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+    inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
 
     async def none_http():
         return None

@@ -283,7 +283,7 @@ async def main():
     efi.SLEW_UP_W_PER_SEC = 400.0
 
     def bind(inj):
-        inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+        inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
         inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
         return inj
 

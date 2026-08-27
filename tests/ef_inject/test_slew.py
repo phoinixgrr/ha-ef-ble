@@ -239,7 +239,7 @@ async def main():
 
     def bind(inj):
         """The Injector points at the real Shellys; aim both meters at the fake."""
-        inj._mb = efi.ModbusMeter("127.0.0.1", "bound")
+        inj._mb = efi.ModbusMeter("127.0.0.1", "solar")
         inj._mb2 = efi.ModbusMeter("127.0.0.1", "grid")
         return inj
 

@@ -179,7 +179,7 @@ class EfInjectTransport(EfInjectEntity, SensorEntity):
     Modbus path failed and every injection is now riding a slower, coarser read. That
     degradation is otherwise invisible, because regulation keeps working.
 
-    The regulator's `via=` field is `modbus:bound` / `modbus:grid`, and the suffix is
+    The regulator's `via=` field is `modbus:solar` / `modbus:grid`, and the suffix is
     dropped here on purpose. It names WHICH of the two meters won the freshness race on
     that cycle, which with the cross-check enabled alternates at roughly 1Hz, so
     reporting it verbatim made this sensor flip continuously and read as a flapping
